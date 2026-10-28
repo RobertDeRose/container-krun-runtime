@@ -56,6 +56,44 @@ unprivileged packaged helper; it still requires the coordinated libkrun ABI.
 selected fork into the protected location instead. Networkless development may
 still use the existing override.
 
+## Helper scheduling: a launchd job of its own
+
+Apple Container starts runtime plugins as Standard launchd jobs. launchd applies
+a scheduling clamp to such a job, and every process the job spawns inherits it,
+including through sudo. A helper spawned directly by the plugin therefore runs
+its vCPU and device threads below ordinary user work. On an idle host this is
+invisible. When the host is busy, the guest is starved: under ten host busy
+loops, a guest CPU-bound loop runs an order of magnitude slower than at idle. Apple's own VM
+process does not slow down, because launchd spawns it as an XPC service.
+
+The clamp cannot be lifted from inside the job. Thread QoS classes, the
+`TASK_CATEGORY_POLICY` foreground role, a negative nice value set as root, and
+`posix_spawnattr_setprocesstype_np` all leave the helper clamped. A job that
+launchd starts with `ProcessType` set to `Interactive` is not clamped, and
+neither are its children.
+
+So the runtime launches the helper as its own job:
+
+1. It writes `krun-vmm.plist` into the container's bundle with mode 0600. The
+   job label is `com.github.robertderose.container-krun-runtime.vmm.<container id>`,
+   with characters launchd does not accept replaced by `_`. The plist sets
+   `ProcessType` to `Interactive` and `RunAtLoad`, and `ExitTimeOut` to 5
+   seconds.
+2. It bootstraps the job into the caller's `gui/<uid>` domain. A stale job with
+   the same label is booted out first.
+3. A launchd job cannot inherit the plugin's socket pair. So the runtime listens
+   on a named Unix socket, `vmm` in the container bundle. The socket is created
+   under umask 0077, and its `controlSocketPath` is passed in `krun-vmm.json`.
+4. After dropping privileges, the helper connects to the socket and installs
+   the connection as its control channel. The runtime accepts only a peer whose
+   effective UID is its own. It waits up to 30 seconds and fails early if the
+   job exits.
+5. To stop the VM, the runtime boots out the job. launchd sends SIGTERM and,
+   after `ExitTimeOut`, SIGKILL.
+
+The native job runs `sudo -n` with the protected helper, as before. A
+networkless job runs the packaged helper directly with the plugin's environment.
+
 ## Build and install the managed patched dependency
 
 Apply the libkrun patch directly to `.build-deps/libkrun`; `git am` records the

@@ -37,6 +37,34 @@ public enum KrunVMMControlChannel {
     )
   }
 
+  /// Listen on a named control socket for a helper that cannot inherit the
+  /// socket pair, such as one started by launchd.
+  public static func listen(path: String) throws -> FileHandle {
+    var fd: Int32 = -1
+    try check(krun_vmm_ipc_listen(path, &fd))
+    return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+  }
+
+  /// Accept the helper's connection; nil when none arrives within the timeout.
+  /// A peer running as any other user is rejected.
+  public static func accept(
+    from listener: FileHandle, timeoutMilliseconds: Int32, peerUID: uid_t
+  ) throws -> FileHandle? {
+    var fd: Int32 = -1
+    let result = krun_vmm_ipc_accept(listener.fileDescriptor, timeoutMilliseconds, peerUID, &fd)
+    if result == -ETIMEDOUT {
+      return nil
+    }
+    try check(result)
+    return FileHandle(fileDescriptor: fd, closeOnDealloc: true)
+  }
+
+  public static func connect(path: String) throws -> Int32 {
+    var fd: Int32 = -1
+    try check(krun_vmm_ipc_connect(path, &fd))
+    return fd
+  }
+
   public static func sendDialRequest(to fd: Int32, port: UInt32) throws {
     try check(krun_vmm_ipc_send_request(fd, dialOpcode, port))
   }

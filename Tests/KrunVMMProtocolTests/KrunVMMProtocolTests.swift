@@ -205,3 +205,65 @@ import Testing
     #expect(error.code == .ECONNREFUSED)
   }
 }
+
+@Test func vmmNamedControlSocketCarriesDialsFromOwner() throws {
+  let directory = URL(fileURLWithPath: "/tmp/krun-ctl-\(UUID().uuidString.prefix(8))")
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let path = directory.appendingPathComponent("vmm").path
+  let listener = try KrunVMMControlChannel.listen(path: path)
+  defer { try? listener.close() }
+
+  var info = stat()
+  #expect(stat(path, &info) == 0)
+  #expect(info.st_mode & 0o077 == 0, "only the owner may connect")
+  #expect(
+    try KrunVMMControlChannel.accept(from: listener, timeoutMilliseconds: 10, peerUID: getuid())
+      == nil, "no helper yet")
+
+  let helperFD = try KrunVMMControlChannel.connect(path: path)
+  defer { close(helperFD) }
+  let runtime = try #require(
+    try KrunVMMControlChannel.accept(from: listener, timeoutMilliseconds: 1000, peerUID: getuid()))
+  defer { try? runtime.close() }
+
+  try KrunVMMControlChannel.sendDialRequest(to: runtime.fileDescriptor, port: 7)
+  #expect(try KrunVMMControlChannel.receiveRequest(from: helperFD) == .dial(port: 7))
+  let sourceFD = open("/dev/null", O_RDONLY)
+  defer { close(sourceFD) }
+  try KrunVMMControlChannel.sendDialResponse(to: helperFD, result: 0, connectedFD: sourceFD)
+  let received = try KrunVMMControlChannel.receiveDialResponse(from: runtime.fileDescriptor)
+  defer { try? received.close() }
+  #expect(fcntl(received.fileDescriptor, F_GETFD) >= 0)
+}
+
+@Test func vmmNamedControlSocketRejectsAnotherUser() throws {
+  let directory = URL(fileURLWithPath: "/tmp/krun-ctl-\(UUID().uuidString.prefix(8))")
+  try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: false)
+  defer { try? FileManager.default.removeItem(at: directory) }
+  let path = directory.appendingPathComponent("vmm").path
+  let listener = try KrunVMMControlChannel.listen(path: path)
+  defer { try? listener.close() }
+  let helperFD = try KrunVMMControlChannel.connect(path: path)
+  defer { close(helperFD) }
+  do {
+    _ = try KrunVMMControlChannel.accept(
+      from: listener, timeoutMilliseconds: 1000, peerUID: getuid() &+ 1)
+    Issue.record("expected EPERM")
+  } catch let error as POSIXError {
+    #expect(error.code == .EPERM)
+  }
+}
+
+@Test func configurationOmitsAbsentControlSocketPath() throws {
+  let config = KrunVMMConfig(
+    libkrun: "/l", kernel: "/k", initDisk: "/i", rootDisk: "/r", commandLine: "c", bootLog: "/b",
+    cpus: 1, memoryMiB: 128, vsockMappings: [])
+  let encoded = String(decoding: try JSONEncoder().encode(config), as: UTF8.self)
+  #expect(!encoded.contains("controlSocketPath"))
+  let withPath = KrunVMMConfig(
+    libkrun: "/l", kernel: "/k", initDisk: "/i", rootDisk: "/r", commandLine: "c", bootLog: "/b",
+    cpus: 1, memoryMiB: 128, vsockMappings: [], controlSocketPath: "/tmp/x/vmm")
+  #expect(
+    try JSONDecoder().decode(KrunVMMConfig.self, from: JSONEncoder().encode(withPath)) == withPath)
+}

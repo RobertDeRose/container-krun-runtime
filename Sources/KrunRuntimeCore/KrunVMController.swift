@@ -28,7 +28,7 @@ public final class KrunVMController: @unchecked Sendable {
     KrunUnixSocketRelays.ociMounts(socketRelays)
   }
 
-  private let helper: Foundation.Process
+  private let helper: KrunHelperJob
   private let helperControl: FileHandle
   private let controlQueue = DispatchQueue(
     label: "com.github.robertderose.container-krun-runtime.vmm-control"
@@ -47,7 +47,7 @@ public final class KrunVMController: @unchecked Sendable {
     volumeAttachments: [KrunVolumeAttachment],
     virtioFSShares: [KrunVirtioFSShare],
     socketRelays: [KrunUnixSocketRelay],
-    helper: Foundation.Process,
+    helper: KrunHelperJob,
     helperControl: FileHandle,
     group: MultiThreadedEventLoopGroup,
     log: Logger,
@@ -164,7 +164,8 @@ public final class KrunVMController: @unchecked Sendable {
         vsockMappings: layout.mappings,
         networks: networkConfigs,
         disks: volumeAttachments.map(\.diskConfig),
-        virtioFS: virtioFSShares.map(\.vmmConfig)
+        virtioFS: virtioFSShares.map(\.vmmConfig),
+        controlSocketPath: layout.directory.appendingPathComponent("vmm").path
       )
       let helperConfigPath = bundle.filePath(for: "krun-vmm.json")
       try JSONEncoder().encode(helperConfig).write(to: helperConfigPath, options: .atomic)
@@ -173,38 +174,48 @@ public final class KrunVMController: @unchecked Sendable {
       let helperLogPath = bundle.filePath(for: "krun-vmm.log")
       FileManager.default.createFile(atPath: helperLogPath.path, contents: nil)
       let helperLog = try FileHandle(forWritingTo: helperLogPath)
-      let controlPair = try KrunVMMControlChannel.makeSocketPair()
-      let helper = Foundation.Process()
-      helper.executableURL = URL(fileURLWithPath: nativeVMNet ? "/usr/bin/sudo" : selectedHelper)
-      helper.arguments = nativeVMNet
-        ? ["-n", "--", selectedHelper, helperConfigPath.path]
-        : [helperConfigPath.path]
-      helper.standardInput = controlPair.helper
-      helper.standardOutput = helperLog
-      helper.standardError = helperLog
+      let controlListener = try KrunVMMControlChannel.listen(
+        path: layout.directory.appendingPathComponent("vmm").path
+      )
+      let helperArguments = nativeVMNet
+        ? ["/usr/bin/sudo", "-n", "--", selectedHelper, helperConfigPath.path]
+        : [selectedHelper, helperConfigPath.path]
       KrunLifecycleTrace.mark(
         log,
         startedAt: lifecycleStartedAt,
         event: "libkrun helper launch"
       )
+      let helper: KrunHelperJob
       do {
-        try helper.run()
+        helper = try KrunHelperJob.launch(
+          label: KrunHelperJob.label(forContainer: config.id),
+          arguments: helperArguments,
+          // sudo discards the environment for the native helper anyway.
+          environment: nativeVMNet ? nil : ProcessInfo.processInfo.environment,
+          logPath: helperLogPath.path,
+          plistPath: bundle.filePath(for: "krun-vmm.plist")
+        )
       } catch {
-        try? controlPair.runtime.close()
-        try? controlPair.helper.close()
+        try? controlListener.close()
         throw error
       }
-      try? controlPair.helper.close()
       KrunLifecycleTrace.mark(
         log,
         startedAt: lifecycleStartedAt,
         event: "libkrun helper launched",
-        metadata: ["pid": "\(helper.processIdentifier)"]
+        metadata: ["label": "\(helper.label)", "pid": "\(helper.processIdentifier)"]
       )
 
       let group = MultiThreadedEventLoopGroup(numberOfThreads: 1)
       var cleanupAgent: Vminitd?
+      var helperControl: FileHandle?
       do {
+        let control = try await acceptHelperControl(
+          listener: controlListener,
+          helper: helper,
+          helperLogPath: helperLogPath
+        )
+        helperControl = control
         let agent = try await connectAgent(
           socketPath: layout.controlPath,
           helper: helper,
@@ -318,7 +329,7 @@ public final class KrunVMController: @unchecked Sendable {
           virtioFSShares: virtioFSShares,
           socketRelays: socketRelays,
           helper: helper,
-          helperControl: controlPair.runtime,
+          helperControl: control,
           group: group,
           log: log,
           helperLogHandle: helperLog
@@ -339,8 +350,8 @@ public final class KrunVMController: @unchecked Sendable {
           try? await cleanupAgent.sync()
           try? await cleanupAgent.close()
         }
-        try? controlPair.runtime.close()
-        terminate(helper)
+        try? helperControl?.close()
+        helper.stop()
         KrunUnixSocketRelays.cleanupHostPaths(socketRelays)
         try? helperLog.close()
         try? await group.shutdownGracefully()
@@ -411,7 +422,7 @@ public final class KrunVMController: @unchecked Sendable {
     await stopSocketRelays()
     try? await agent.close()
     try? helperControl.close()
-    Self.terminate(helper)
+    helper.stop()
     KrunUnixSocketRelays.cleanupHostPaths(socketRelays)
     try? helperLogHandle.close()
     try? await eventLoopGroup.shutdownGracefully()
@@ -420,7 +431,7 @@ public final class KrunVMController: @unchecked Sendable {
 
   private static func connectAgent(
     socketPath: String,
-    helper: Foundation.Process,
+    helper: KrunHelperJob,
     helperLogPath: URL,
     group: MultiThreadedEventLoopGroup,
     log: Logger,
@@ -652,15 +663,32 @@ public final class KrunVMController: @unchecked Sendable {
     )
   }
 
-  private static func terminate(_ process: Foundation.Process) {
-    guard process.isRunning else { return }
-    process.terminate()
-    for _ in 0..<100 where process.isRunning {
-      Thread.sleep(forTimeInterval: 0.05)
+  /// Wait for the launchd-started helper to connect its control channel. It
+  /// connects just before entering the VM, after dropping privileges.
+  private static func acceptHelperControl(
+    listener: FileHandle,
+    helper: KrunHelperJob,
+    helperLogPath: URL
+  ) async throws -> FileHandle {
+    defer {
+      try? listener.close()
     }
-    if process.isRunning {
-      kill(process.processIdentifier, SIGKILL)
-    }
-    process.waitUntilExit()
+    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
+    repeat {
+      if let control = try KrunVMMControlChannel.accept(
+        from: listener, timeoutMilliseconds: 100, peerUID: getuid())
+      {
+        return control
+      }
+      guard helper.isRunning else {
+        let log = (try? String(contentsOf: helperLogPath, encoding: .utf8)) ?? ""
+        throw ContainerizationError(
+          .internalError,
+          message: "libkrun helper exited before connecting its control channel: \(log)"
+        )
+      }
+    } while ContinuousClock.now < deadline
+    throw ContainerizationError(
+      .timeout, message: "libkrun helper did not connect its control channel within 30 seconds")
   }
 }

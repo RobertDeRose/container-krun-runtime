@@ -370,6 +370,18 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
     signal(SIGTERM, SIG_DFL)
   }
 
+  // A launchd-started helper has no inherited channel on standard input. Connect
+  // only now, after privileges are dropped, so the configured path is reached
+  // with the caller's identity, never root's.
+  if let path = config.controlSocketPath {
+    let fd = try KrunVMMControlChannel.connect(path: path)
+    guard dup2(fd, STDIN_FILENO) == STDIN_FILENO else {
+      throw KrunError(description: "cannot attach control socket: errno \(errno)")
+    }
+    close(fd)
+    HelperLifecycleTrace.mark(startedAt: startedAt, event: "control socket connected")
+  }
+
   DispatchQueue(
     label: "com.github.robertderose.container-krun-runtime.vmm-control"
   ).async {

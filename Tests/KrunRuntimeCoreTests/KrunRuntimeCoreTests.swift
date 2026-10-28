@@ -24,6 +24,15 @@ import Testing
   #expect(layout.mappings.dropFirst().allSatisfy { !$0.listen })
 }
 
+@Test func helperJobLabelKeepsLaunchdSafeCharacters() {
+  #expect(
+    KrunHelperJob.label(forContainer: "web-1.a_b")
+      == "com.github.robertderose.container-krun-runtime.vmm.web-1.a_b")
+  #expect(
+    KrunHelperJob.label(forContainer: "a/b c")
+      == "com.github.robertderose.container-krun-runtime.vmm.a_b_c")
+}
+
 @Test func copyPortPoolRotatesReleasedMappings() async throws {
   let entries = (0..<3).map { index in
     KrunSocketLayout.IOEntry(port: UInt32(index), path: "/tmp/copy-\(index)")

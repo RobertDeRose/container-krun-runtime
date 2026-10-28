@@ -8,6 +8,9 @@ extern "C" {
 #endif
 
 int32_t krun_vmm_ipc_socketpair(int32_t fds[2]);
+int32_t krun_vmm_ipc_listen(const char *path, int32_t *listen_fd);
+int32_t krun_vmm_ipc_accept(int32_t listen_fd, int32_t timeout_ms, uint32_t peer_uid, int32_t *fd);
+int32_t krun_vmm_ipc_connect(const char *path, int32_t *fd);
 int32_t krun_vmm_ipc_send_request(int32_t fd, uint32_t opcode, uint32_t port);
 int32_t krun_vmm_ipc_recv_request(int32_t fd, uint32_t *opcode, uint32_t *port);
 int32_t krun_vmm_ipc_send_response(int32_t fd, int32_t status, int32_t passed_fd);

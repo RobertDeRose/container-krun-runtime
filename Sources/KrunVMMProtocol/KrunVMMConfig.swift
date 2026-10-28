@@ -110,6 +110,9 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
   public let networks: [KrunNetworkConfig]
   public let disks: [KrunDiskConfig]
   public let virtioFS: [KrunVirtioFSConfig]
+  /// Named control socket to connect to instead of using standard input,
+  /// for a helper that launchd starts and so cannot inherit the socket pair.
+  public let controlSocketPath: String?
 
   public init(
     libkrun: String,
@@ -123,7 +126,8 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     vsockMappings: [KrunVsockMapping],
     networks: [KrunNetworkConfig] = [],
     disks: [KrunDiskConfig] = [],
-    virtioFS: [KrunVirtioFSConfig] = []
+    virtioFS: [KrunVirtioFSConfig] = [],
+    controlSocketPath: String? = nil
   ) {
     self.libkrun = libkrun
     self.kernel = kernel
@@ -137,6 +141,7 @@ public struct KrunVMMConfig: Codable, Sendable, Equatable {
     self.networks = networks
     self.disks = disks
     self.virtioFS = virtioFS
+    self.controlSocketPath = controlSocketPath
   }
 }
 

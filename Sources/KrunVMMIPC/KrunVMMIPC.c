@@ -5,7 +5,10 @@
 #include <fcntl.h>
 #include <stddef.h>
 #include <string.h>
+#include <poll.h>
 #include <sys/socket.h>
+#include <sys/stat.h>
+#include <sys/un.h>
 #include <unistd.h>
 
 struct krun_vmm_request {
@@ -106,6 +109,106 @@ int32_t krun_vmm_ipc_socketpair(int32_t fds[2]) {
 
     fds[0] = pair[0];
     fds[1] = pair[1];
+    return 0;
+}
+
+static int set_nosigpipe(int fd) {
+#ifdef SO_NOSIGPIPE
+    int enabled = 1;
+    return setsockopt(fd, SOL_SOCKET, SO_NOSIGPIPE, &enabled, sizeof(enabled));
+#else
+    (void)fd;
+    return 0;
+#endif
+}
+
+static int unix_address(const char *path, struct sockaddr_un *address) {
+    if (path == NULL || strlen(path) >= sizeof(address->sun_path)) {
+        errno = path == NULL ? EINVAL : ENAMETOOLONG;
+        return -1;
+    }
+    memset(address, 0, sizeof(*address));
+    address->sun_family = AF_UNIX;
+    strcpy(address->sun_path, path);
+    return 0;
+}
+
+// A named endpoint for a helper that cannot inherit the socket pair, such as
+// one launchd starts. Only the owner may connect; accept also checks the peer.
+int32_t krun_vmm_ipc_listen(const char *path, int32_t *listen_fd) {
+    struct sockaddr_un address;
+    if (listen_fd == NULL || unix_address(path, &address) < 0) {
+        return listen_fd == NULL ? -EINVAL : neg_errno();
+    }
+    int fd = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (fd < 0) {
+        return neg_errno();
+    }
+    (void)unlink(path);
+    mode_t old_mask = umask(0077);
+    int bound = bind(fd, (struct sockaddr *)&address, sizeof(address));
+    umask(old_mask);
+    if (bound < 0 || listen(fd, 1) < 0 || set_cloexec(fd) < 0) {
+        int saved = errno;
+        close(fd);
+        errno = saved;
+        return neg_errno();
+    }
+    *listen_fd = fd;
+    return 0;
+}
+
+int32_t krun_vmm_ipc_accept(int32_t listen_fd, int32_t timeout_ms, uint32_t peer_uid, int32_t *fd) {
+    if (fd == NULL) {
+        return -EINVAL;
+    }
+    struct pollfd ready = {.fd = listen_fd, .events = POLLIN};
+    int polled = poll(&ready, 1, timeout_ms);
+    if (polled < 0) {
+        return neg_errno();
+    }
+    if (polled == 0) {
+        return -ETIMEDOUT;
+    }
+    int connected = accept(listen_fd, NULL, NULL);
+    if (connected < 0) {
+        return neg_errno();
+    }
+    uid_t uid = (uid_t)-1;
+    gid_t gid = (gid_t)-1;
+    if (getpeereid(connected, &uid, &gid) < 0 || uid != (uid_t)peer_uid) {
+        int saved = uid != (uid_t)peer_uid ? EPERM : errno;
+        close(connected);
+        errno = saved;
+        return neg_errno();
+    }
+    if (set_nosigpipe(connected) < 0 || set_cloexec(connected) < 0) {
+        int saved = errno;
+        close(connected);
+        errno = saved;
+        return neg_errno();
+    }
+    *fd = connected;
+    return 0;
+}
+
+int32_t krun_vmm_ipc_connect(const char *path, int32_t *fd) {
+    struct sockaddr_un address;
+    if (fd == NULL || unix_address(path, &address) < 0) {
+        return fd == NULL ? -EINVAL : neg_errno();
+    }
+    int connected = socket(AF_UNIX, SOCK_STREAM, 0);
+    if (connected < 0) {
+        return neg_errno();
+    }
+    if (connect(connected, (struct sockaddr *)&address, sizeof(address)) < 0
+        || set_nosigpipe(connected) < 0) {
+        int saved = errno;
+        close(connected);
+        errno = saved;
+        return neg_errno();
+    }
+    *fd = connected;
     return 0;
 }
 
