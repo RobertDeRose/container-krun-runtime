@@ -25,6 +25,7 @@ import native_vmnet_validation as native
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 RUNTIME = 'container-krun-runtime'
+HELPER_JOB_PREFIX = 'com.github.robertderose.container-krun-runtime.vmm.'
 
 
 @dataclass
@@ -291,6 +292,24 @@ def copy_bundle_named(run: native.Run, bundle: Path, prefix: str) -> None:
         (run.directory / f'{prefix}-boot.log').write_bytes(boot.read_bytes())
 
 
+def helper_job(container_id: str, uid: int | None = None) -> str:
+    """The launchd service target the runtime bootstraps for a container's VMM helper."""
+    safe = re.sub(r'[^A-Za-z0-9._-]', '_', container_id)
+    return f'gui/{os.getuid() if uid is None else uid}/{HELPER_JOB_PREFIX}{safe}'
+
+
+def wait_helper_job_unloaded(container_id: str, timeout: float = 10) -> bool:
+    deadline = time.monotonic() + timeout
+    while True:
+        result = subprocess.run(['launchctl', 'print', helper_job(container_id)],
+                                stdin=subprocess.DEVNULL, capture_output=True, timeout=5)
+        if result.returncode != 0:
+            return True
+        if time.monotonic() >= deadline:
+            return False
+        time.sleep(0.2)
+
+
 class Acceptance:
     def __init__(self, args: argparse.Namespace, run: native.Run, system: dict[str, Any], prefix: str) -> None:
         self.args = args
@@ -358,6 +377,9 @@ class Acceptance:
         require((uid, gid) == (os.getuid(), os.getgid()), f'{container_id} VMM did not drop privileges')
         require(str(native.HELPER) in process_command, f'{container_id} attested PID is not protected helper')
         require(not native.external_helpers(current) - self.baseline_helpers, 'external vmnet-helper appeared')
+        job = self.run.command(f'{suffix}-helper-job', ['launchctl', 'print', helper_job(container_id)])
+        require('spawn type = interactive' in job,
+                f'{container_id} VMM helper is not an Interactive launchd job')
         inspected = json.loads(self.run.command(f'{suffix}-inspect', ['container', 'inspect', container_id]))
         return ContainerEvidence(container_id, bundle, config, helper_pid, inspected)
 
@@ -372,6 +394,8 @@ class Acceptance:
         )
         self.run.command(f'{suffix}-delete', ['container', 'delete', evidence.container_id], timeout=20)
         require(wait_pid_gone(evidence.helper_pid), f'{evidence.container_id} VMM helper remained after delete')
+        require(wait_helper_job_unloaded(evidence.container_id),
+                f'{evidence.container_id} VMM helper launchd job remained after delete')
         self.created_containers.discard(evidence.container_id)
 
     def force_delete(self, container_id: str, suffix: str) -> None:
@@ -651,6 +675,9 @@ def abnormal_phase(acc: Acceptance) -> None:
     os.kill(evidence.helper_pid, signal.SIGKILL)
     require(wait_pid_gone(evidence.helper_pid), 'SIGKILLed VMM helper did not exit')
     run.record('abrupt VMM SIGKILL observed', True)
+    require(wait_helper_job_unloaded(evidence.container_id),
+            'crashed VMM helper launchd job remained loaded')
+    run.record('crashed VMM helper launchd job unloaded', True)
     acc.force_delete(evidence.container_id, 'crash')
     recovery = acc.start('crash-recovery', [acc.args.network])
     validate_bidirectional(run, recovery, 'crash-recovery', secrets.token_hex(12))

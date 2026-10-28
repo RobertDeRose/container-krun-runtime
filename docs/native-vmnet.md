@@ -178,7 +178,9 @@ scripts/validate_native_vmnet_acceptance.sh
 It is the completion gate for the remaining native-network work. It validates two
 concurrent VMs on the same Apple network, a two-NIC container plus partial network
 allocation rollback, published TCP and UDP ports plus partial forwarder rollback,
-and recovery after an abrupt VMM `SIGKILL`. It also rejects production-source
+and recovery after an abrupt VMM `SIGKILL`. Every VMM helper it starts must run
+as an Interactive launchd job, and that job must be unloaded after stop/delete
+and after the `SIGKILL`. It also rejects production-source
 references to the old `vmnet-helper`, `krun_add_net_unixgram`, and named packet
 socket path.
 

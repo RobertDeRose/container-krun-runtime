@@ -67,6 +67,20 @@ class NativeTraceManyTests(unittest.TestCase):
                 acceptance.native_trace_many(trace_two().replace(old, new), config_two(), 502, 20)
 
 
+class HelperJobTests(unittest.TestCase):
+    def test_helper_job_matches_runtime_label(self) -> None:
+        self.assertEqual(
+            acceptance.helper_job('native-acceptance-crash', uid=502),
+            'gui/502/com.github.robertderose.container-krun-runtime.vmm.native-acceptance-crash',
+        )
+
+    def test_helper_job_replaces_characters_launchd_rejects(self) -> None:
+        self.assertEqual(
+            acceptance.helper_job('a b/c:d', uid=0),
+            'gui/0/com.github.robertderose.container-krun-runtime.vmm.a_b_c_d',
+        )
+
+
 class LegacyRemovalTests(unittest.TestCase):
     def test_legacy_scan_ignores_docs_and_validation_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
