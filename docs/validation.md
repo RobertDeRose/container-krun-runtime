@@ -190,7 +190,7 @@ with a fresh inode, and restarts Apple Container before collecting evidence:
   bin_dir="$install_root/libexec/container-plugins/container-krun-runtime/bin"
   staged="$(mktemp "$bin_dir/.pty-resize-runtime.XXXXXX")"
   trap 'rm -f "$staged"' EXIT
-  install -m 755 .build/arm64-apple-macosx/release/container-krun-runtime "$staged"
+  install -m 755 .build/release/container-krun-runtime "$staged"
   mv -f "$staged" "$bin_dir/container-krun-runtime"
   container system stop
   container system start
