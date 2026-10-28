@@ -277,7 +277,13 @@ public actor KrunRuntimeService {
     io.startRelays(agent: processAgent, id: id, containerID: containerConfig.id)
     let containerID = containerConfig.id
     record.waitTask = Task {
-      let status = try await processAgent.waitProcess(id: id, containerID: containerID)
+      let status: ExitStatus
+      do {
+        status = try await processAgent.waitProcess(id: id, containerID: containerID)
+      } catch {
+        await self.failProcessWait(id: id)
+        throw error
+      }
       await io.waitForOutput()
       await self.finalizeProcessExit(id: id, status: status)
       return status
@@ -717,6 +723,15 @@ public actor KrunRuntimeService {
     record.waitTask = nil
     record.agent = nil
     processes[id] = record
+  }
+
+  /// The guest stopped answering, most likely because the VMM died. Without an
+  /// exit status there is no natural exit to finalize, but the VM's resources
+  /// still need releasing: the helper's launchd job outlives this service.
+  private func failProcessWait(id: String) async {
+    if id == config?.id && state != .stopping {
+      await cleanupContainer()
+    }
   }
 
   private func cleanupContainer() async {
