@@ -3,6 +3,7 @@
 from pathlib import Path
 import re
 import sys
+import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
 main = (ROOT / "Sources/KrunRuntimePlugin/main.swift").read_text()
@@ -15,6 +16,17 @@ if (helper_directory / "main.swift").exists():
     raise SystemExit(1)
 helper = (helper_directory / "KrunVMMHelperMain.swift").read_text()
 config = (ROOT / "plugin/container-krun-runtime/config.toml").read_text()
+
+with (ROOT / "mise.toml").open("rb") as stream:
+    mise = tomllib.load(stream)
+
+runtime_dial_task = mise["tasks"]["validate:runtime-dial"]
+if runtime_dial_task.get("run") != "scripts/validate_runtime_dial.sh --install":
+    print(
+        "mise task validate:runtime-dial must install this checkout before behavioral validation",
+        file=sys.stderr,
+    )
+    raise SystemExit(1)
 
 routes = {
     "bootstrap",
