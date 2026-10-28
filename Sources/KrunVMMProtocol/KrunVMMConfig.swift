@@ -67,6 +67,14 @@ public struct KrunVsockMapping: Codable, Sendable, Equatable {
   }
 }
 
+public enum KrunNetworkFeatures {
+  // vmnet TSO is bidirectional. Match checksum and TCP segmentation support
+  // on guest RX/TX while keeping UDP fragmentation offload disabled.
+  // Keep in sync with VMNET_NATIVE_TCP_FEATURES.
+  public static let nativeVMNetTCPOffload: UInt32 =
+    (1 << 0) | (1 << 1) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12)
+}
+
 public struct KrunNetworkConfig: Codable, Sendable, Equatable {
   public let ipv4Gateway: String
   public let ipv4Mask: String
