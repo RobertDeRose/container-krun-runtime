@@ -390,6 +390,10 @@ capture_libkrun_provenance(){
   cp "$provenance" "$OUT/libkrun.provenance"
 }
 
+# Wait on a background sleep so the TERM trap runs at once; a foreground sleep
+# defers it until the sleep ends and adds up to a second to every stop sample.
+KEEPALIVE='trap "exit 0" TERM; while :; do sleep 1 & wait; done'
+
 time_cmd(){
   local runtime="$1" metric="$2" iteration="$3"; shift 3
   progress "$runtime: $metric sample $iteration"
@@ -520,7 +524,7 @@ for ((i=1; i<=ITERATIONS; i++)); do
     time_cmd "$runtime" startup "$i" \
       container run -d --name "$id" --runtime "$runtime" --network none \
       "${STARTUP_MEMORY_ARGS[@]}" "${STARTUP_CPU_ARGS[@]}" "${STARTUP_CAP_ARGS[@]}" "$IMAGE" \
-      sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' \
+      sh -c "$KEEPALIVE" \
       >"$OUT/${key}-startup-$i.txt" 2>&1 || true
     if [[ "$runtime" == "$RUNTIME_B" ]]; then
       capture_krun_helper_log "$id" "$i"
@@ -545,7 +549,7 @@ for runtime in "$RUNTIME_A" "$RUNTIME_B"; do
   track_id "$id"
   if ! run_bounded "$COMMAND_TIMEOUT_SECONDS" \
       container run -d --name "$id" --runtime "$runtime" --network none "$IMAGE" \
-      sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' \
+      sh -c "$KEEPALIVE" \
       >"$OUT/${key}-live-start.txt" 2>&1; then
     FAILED=1
   fi
@@ -600,7 +604,7 @@ for runtime in "$RUNTIME_A" "$RUNTIME_B"; do
   progress "$runtime: memory reclaimability observation"
   if run_bounded "$COMMAND_TIMEOUT_SECONDS" \
       container run -d --name "$mem" --runtime "$runtime" --network none --memory 1920M --shm-size 1200M \
-      "$IMAGE" sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' >"$OUT/${key}-memory-start.txt" 2>&1; then
+      "$IMAGE" sh -c "$KEEPALIVE" >"$OUT/${key}-memory-start.txt" 2>&1; then
     if run_bounded "$COMMAND_TIMEOUT_SECONDS" container exec "$mem" sh -c \
         'dd if=/dev/urandom of=/dev/shm/reclaim.bin bs=1M count=1024 >/dev/null 2>&1; sync' \
         >"$OUT/${key}-memory-allocate.txt" 2>&1; then
@@ -641,7 +645,7 @@ for runtime in "$RUNTIME_A" "$RUNTIME_B"; do
   fi
   if ! run_bounded "$COMMAND_TIMEOUT_SECONDS" \
       container run -d --name "$vid" --runtime "$runtime" --network none \
-      -v "$vol:/bench" "$IMAGE" sh -c 'trap "exit 0" TERM; while :; do sleep 1; done' \
+      -v "$vol:/bench" "$IMAGE" sh -c "$KEEPALIVE" \
       >"$OUT/${key}-volume-container-start.txt" 2>&1; then
     FAILED=1
   fi
@@ -678,9 +682,33 @@ done
 for runtime in "$RUNTIME_A" "$RUNTIME_B"; do
   key="$(runtime_key "$runtime")"
   id="$PREFIX-${key}-live"
-  time_cmd "$runtime" stop 1 container stop "$id" >"$OUT/${key}-stop.txt" 2>&1 || true
-  time_cmd "$runtime" delete 1 container delete "$id" >"$OUT/${key}-delete.txt" 2>&1 || true
+  if ! run_bounded "$CLEANUP_TIMEOUT_SECONDS" container delete --force "$id" \
+      >"$OUT/${key}-live-delete.txt" 2>&1; then
+    FAILED=1
+  fi
   untrack_id "$id"
+done
+
+progress "paired stop/delete samples"
+for ((i=1; i<=ITERATIONS; i++)); do
+  if ((i % 2 == 1)); then
+    first="$RUNTIME_A"; second="$RUNTIME_B"
+  else
+    first="$RUNTIME_B"; second="$RUNTIME_A"
+  fi
+  for runtime in "$first" "$second"; do
+    key="$(runtime_key "$runtime")"
+    id="$PREFIX-${key}-stop-$i"
+    track_id "$id"
+    if ! run_bounded "$COMMAND_TIMEOUT_SECONDS" \
+        container run -d --name "$id" --runtime "$runtime" --network none "$IMAGE" \
+        sh -c "$KEEPALIVE" >"$OUT/${key}-stop-$i-start.txt" 2>&1; then
+      FAILED=1
+    fi
+    time_cmd "$runtime" stop "$i" container stop "$id" >"$OUT/${key}-stop-$i.txt" 2>&1 || true
+    time_cmd "$runtime" delete "$i" container delete "$id" >"$OUT/${key}-delete-$i.txt" 2>&1 || true
+    untrack_id "$id"
+  done
 done
 
 finish_results
