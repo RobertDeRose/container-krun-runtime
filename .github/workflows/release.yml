@@ -1,0 +1,91 @@
+name: Release
+on:
+  push:
+    branches: [main]
+  # Retries a release that stopped partway; the run finishes the latest tag.
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: release
+  cancel-in-progress: false
+jobs:
+  release:
+    name: Release
+    # A manual run from another branch would only be skipped as stale below.
+    if: github.ref == 'refs/heads/main'
+    # The runtime and libkrun are Apple Silicon macOS binaries, built where they run.
+    runs-on: macos-26
+    timeout-minutes: 90
+    # Every write (tag, release, Homebrew tap, packslip bundle) uses the
+    # Robborg app token. packslip signs with this workflow's OIDC identity.
+    permissions:
+      contents: read
+      id-token: write
+      attestations: write
+    steps:
+      - id: app-token
+        uses: actions/create-github-app-token@64ab729a6294000f5aa4a4bc0b73d1f32bc45510 # v3.3.0
+        with:
+          client-id: ${{ secrets.ROBBORG_CLIENT_ID }}
+          private-key: ${{ secrets.ROBBORG_PRIVATE_KEY }}
+          owner: ${{ github.repository_owner }}
+          repositories: |
+            container-krun-runtime
+            homebrew-tap
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: false
+      - uses: jdx/mise-action@82a612c5ab8bcda7cc5db6b7e81a8e7584c3dc6e # v5.2.3
+        with:
+          install: false
+          cache: false
+      # Rust builds libkrun; Cocogitto picks the version.
+      - name: Install release tooling
+        run: |
+          mise install --locked rust cocogitto
+          brew install llvm lld xz
+      - name: Check toolchain
+        run: swift --version
+      # Cocogitto picks the version from the commits since the latest tag, then
+      # the script builds and packages the runtime, pushes the tag, and
+      # publishes the release and Homebrew formula (see scripts/release.sh).
+      - name: Release
+        id: release
+        env:
+          GITHUB_TOKEN: ${{ steps.app-token.outputs.token }}
+          # Run only the locked tools installed above; never fetch anything else mid-release.
+          MISE_EXEC_AUTO_INSTALL: "false"
+        run: |
+          # Do not release a stale commit if main advanced while this queued.
+          git fetch -q origin main
+          if [[ "$(git rev-parse origin/main)" != "$GITHUB_SHA" ]]; then
+            echo "main has advanced; the newer run will release it"
+            exit 0
+          fi
+          mise exec -- ./scripts/release.sh
+      # A retried run signs a release whose earlier run stopped before this.
+      - name: Check for a packslip bundle
+        id: unsigned
+        if: steps.release.outputs.tag != ''
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json assets --jq '.assets[].name' | grep -qx packslip.sigstore.json; then
+            echo "$TAG already has a packslip bundle"
+          else
+            echo "tag=$TAG" >>"$GITHUB_OUTPUT"
+          fi
+      # mise installs with packslip:github.com/RobertDeRose/container-krun-runtime.
+      - name: Sign the release with packslip
+        if: steps.unsigned.outputs.tag != ''
+        uses: jdx/packslip@b934a22ba187f1d3928441170b9413c5119360bf # v1.11.2
+        with:
+          download: container-krun-runtime-*-darwin-aarch64.tar.gz
+          tag: ${{ steps.unsigned.outputs.tag }}
+          commit: ${{ steps.release.outputs.commit }}
+          bin: container-krun-runtime/cli/container-krun-runtime-setup
+          token: ${{ steps.app-token.outputs.token }}

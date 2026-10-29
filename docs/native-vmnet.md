@@ -96,15 +96,15 @@ networkless job runs the packaged helper directly with the plugin's environment.
 
 ## Build and install the managed patched dependency
 
-Apply the libkrun patch directly to `.build-deps/libkrun`; `git am` records the
-patch as a commit, so provenance can identify the exact source revision. Apply the
-runtime patch on top of the PTY diagnostic and compatibility patches. Do not apply
-it to the old `wip/direct-vmnet-runtime` branch.
+`scripts/fetch_libkrun.sh` checks out the libkrun fork at `LIBKRUN_BASE_COMMIT`
+from `mise.toml` into `.build-deps/libkrun`. That commit already carries the native
+vmnet backend; to try a libkrun change, commit it in that checkout, so provenance
+can identify the exact source revision.
 
 From the runtime checkout:
 
 ```bash
-git -C .build-deps/libkrun am --3way ~/Downloads/libkrun-native-vmnet-owned-network.patch
+scripts/fetch_libkrun.sh
 mise install
 mise run check
 container system stop
@@ -112,17 +112,19 @@ mise run native:install
 container system start
 ```
 
-`mise run native:install` requests sudo for the protected installation. Inspect
-the changes before approving it. The system stop interrupts running containers;
-finish other container work first. No kernel/initfs or Apple CLI patch is needed.
+`mise run native:install` builds and stages the same package a release ships, then
+runs its `container-krun-runtime-setup`, which requests sudo for the protected
+installation. Inspect the changes before approving it. The system stop interrupts
+running containers; finish other container work first. No kernel/initfs or Apple
+CLI patch is needed.
 
 The libkrun task uses `.build-deps/libkrun`, requires intentional source changes
 to be committed, and records its actual HEAD and build hash. The repository-owned
 `.checkout-*` mise stamp is ignored when determining whether libkrun source is clean.
-The installer records
+Staging records
 the final signed/normalized dylib and helper hashes separately from the original
 build hash. LLVM, lld, and xz remain build dependencies; `vmnet-helper` is not a
-native-backend dependency. The old `libkrun:checkout` task has been removed.
+native-backend dependency.
 
 A failed install does not restart Apple Container automatically. Correct the
 reported error and repeat installation before starting the service. Runtime,

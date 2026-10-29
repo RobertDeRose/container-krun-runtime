@@ -11,6 +11,7 @@ struct KrunRuntimePlugin: AsyncParsableCommand {
   static let configuration = CommandConfiguration(
     commandName: "container-krun-runtime",
     abstract: "Apple Container runtime backed by libkrun",
+    version: KrunVersion.current,
     subcommands: [Start.self]
   )
 }

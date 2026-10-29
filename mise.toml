@@ -2,6 +2,8 @@ min_version = "2026.9.3"
 
 [tools]
 rust = { version = "1.98.1", profile = "minimal" }
+# Release automation; see cog.toml and scripts/release.sh.
+cocogitto = "7.0.0"
 
 [vars]
 LIBKRUN_BASE_COMMIT = "01b1d2182fd7d4c128ae062915ed9182fed1283e"
@@ -54,6 +56,20 @@ touch "$build_dir/.container-krun-runtime-signed"
 [tasks.release]
 description = "Build patched libkrun and signed arm64 release binaries"
 depends = ["libkrun", "sign"]
+
+[tasks.stage]
+description = "Lay out the installable package under dist/staging"
+depends = ["libkrun", "release:build"]
+run = "scripts/stage.sh"
+
+[tasks.package]
+description = "Archive the staged package under dist/ with its checksum"
+depends = ["stage"]
+run = "scripts/package.sh"
+
+[tasks."release:preview"]
+description = "Show the version and notes the next release would publish, changing nothing"
+run = "scripts/release.sh --dry-run"
 
 [tasks.install]
 description = "Install native vmnet runtime and protected helper (requests sudo)"

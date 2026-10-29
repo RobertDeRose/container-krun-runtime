@@ -12,19 +12,9 @@ No changes to `apple/container` or `apple/containerization` are required. The pl
 
 Product page: <https://robertderose.github.io/container-krun-runtime/>
 
-## Native vmnet development slice
-
-This branch now uses **native libkrun vmnet on macOS 26+**, with a protected
-privileged setup followed by permanent UID/GID drop. Apply the coordinated libkrun
-patch to the repository-managed `.build-deps/libkrun` checkout. Native build/install
-tasks use that checkout directly and do not require a separate source-path variable.
-Read [native setup and one-NIC validation](docs/native-vmnet.md) before installing.
-The capability table below describes the established runtime baseline, not proof
-that every topology has already passed on this new packet backend.
-
 ## Current scope
 
-v0.4.0 establishes the lifecycle, networking, host-integration, and selected parity baseline. Development on v0.5 adds live rootfs export, multiple network attachments, and repeatable runtime comparisons:
+What the runtime supports:
 
 | Capability | Current |
 | --- | --- |
@@ -60,24 +50,70 @@ managed default-network resolution. It creates its own vmnet network in libkrun;
 Apple's `reserved` serialization is not consumed. `--network none` remains
 unprivileged. Native failures never fall back to external `vmnet-helper`.
 
-## Prerequisites
+## Requirements
 
-- Apple Silicon Mac running macOS 26+ and a macOS 26+ SDK.
-- Apple Container 1.5.0 (`d265d66`) and Containerization 0.47.0.
-- mise 2026.9.3+, Xcode Swift 6.2+, Homebrew `llvm`, `lld`, and `xz`.
-- The coordinated libkrun patch, applied with `git am --3way` to the managed pinned checkout.
-- Administrator approval for a root-owned helper/library and a narrowly scoped
-  per-user sudo rule. The VM runs unprivileged after native network setup.
+- An Apple Silicon Mac running macOS 26 or newer.
+- Apple Container 1.5.0 or newer, with `container` on your `PATH`.
+- Administrator approval, once per install, for networking: a root-owned copy of the VMM helper
+  and libkrun, and a sudo rule that lets your user run only that copy. Containers started with
+  `--network none` need neither. See [the privilege boundary](docs/native-vmnet.md#privilege-boundary).
+
+## Install
+
+Install the package with Homebrew or mise, then run `container-krun-runtime-setup`. Setup copies the
+runtime into the plugin directory of the `container` on your `PATH` and installs the network helper,
+asking for sudo for that part only. Pass `--no-network` to skip the helper.
+
+### Homebrew
+
+```bash
+brew install RobertDeRose/tap/container-krun-runtime
+container-krun-runtime-setup
+container system stop && container system start
+```
+
+### mise
+
+```bash
+mise use -g packslip:github.com/RobertDeRose/container-krun-runtime
+container-krun-runtime-setup
+container system stop && container system start
+```
+
+mise verifies the release's [packslip](https://packslip.dev) signature against this repository before
+installing it. By default mise skips releases younger than 24 hours; name a version, such as
+`packslip:github.com/RobertDeRose/container-krun-runtime@0.9.0`, to install a newer one.
+
+To run setup automatically whenever mise installs a new version, give the tool a `postinstall` step.
+It prompts for sudo during `mise install` or `mise upgrade`:
+
+```toml
+# ~/.config/mise/config.toml
+[tools."packslip:github.com/RobertDeRose/container-krun-runtime"]
+version = "latest"
+postinstall = '"$MISE_TOOL_INSTALL_PATH/container-krun-runtime/cli/container-krun-runtime-setup"'
+```
+
+### Upgrade and uninstall
+
+Setup installs a copy, so after upgrading either `container-krun-runtime` or `container`, run
+`container-krun-runtime-setup` again and restart Apple Container. To remove the plugin, the network
+helper, and the sudo rule:
+
+```bash
+container-krun-runtime-setup --uninstall
+```
+
+### From source
+
+Building needs Xcode with Swift 6.2+, mise 2026.9.3+, and Homebrew `llvm`, `lld`, and `xz`.
+`mise run native:install` fetches the libkrun fork at the commit pinned in `mise.toml`, builds it and the
+runtime, stages the same package a release ships, and runs its setup:
 
 ```bash
 brew install llvm lld xz
-```
-
-## Build and install
-
-```bash
-git -C .build-deps/libkrun am --3way ~/Downloads/libkrun-native-vmnet-owned-network.patch
 mise install
+scripts/fetch_libkrun.sh
 mise run native:install
 ```
 
@@ -86,16 +122,18 @@ including transitive dependency versions. Use the same flag with direct `swift b
 For an intentional dependency change, resolve or update dependencies separately, review and commit
 `Package.resolved`, then rerun validation. Do not delete the lockfile to clear build warnings.
 
-`mise run native:install` (also available as `mise run install`) derives the Apple Container installation root from the resolved `container` executable. mise pins Rust 1.98.1 for the libkrun build. Override the installation root when necessary:
+`mise run native:install` (also available as `mise run install`) derives the Apple Container installation root
+from the resolved `container` executable. mise pins Rust 1.98.1 for the libkrun build. Override the installation
+root when necessary:
 
 ```bash
 INSTALL_ROOT=/path/to/container/install/root mise run install
 ```
 
-The installed layout is:
+### Installed layout
 
 ```text
-$INSTALL_ROOT/libexec/container-plugins/container-krun-runtime/
+<install-root>/libexec/container-plugins/container-krun-runtime/
 ├── config.toml
 ├── bin/
 │   ├── container-krun-runtime
@@ -106,17 +144,10 @@ $INSTALL_ROOT/libexec/container-plugins/container-krun-runtime/
 └── share/licenses/libkrun/LICENSE
 ```
 
-The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not need that entitlement because libkrun is isolated in the helper process. Networked VMs load the fixed root-owned copy under
-`/Library/PrivilegedHelperTools/com.github.robertderose.container-krun-runtime`.
-Networkless VMs use the packaged copy. `LIBKRUN_DYLIB` is rejected for native setup
-unless it names the protected copy. See [the privilege boundary](docs/native-vmnet.md#privilege-boundary).
-
-Restart the Apple Container system after installing so the API server rescans runtime plugins:
-
-```bash
-container system stop
-container system start
-```
+The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not
+need that entitlement because libkrun is isolated in the helper process. Networked VMs load the fixed root-owned
+copy under `/Library/PrivilegedHelperTools/com.github.robertderose.container-krun-runtime`. Networkless VMs use the
+packaged copy. `LIBKRUN_DYLIB` is rejected for native setup unless it names the protected copy.
 
 ## Use
 
@@ -231,14 +262,17 @@ Apple's network plugin remains authoritative for attachment allocation/IPAM. A r
 
 See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 
-## Status
-
-The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
-
-v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. Current development adds live rootfs snapshot/export, multiple allocation-only attachments, persistent `container logs`, filesystem trim through `container clean`, and a non-gating comparison harness against Apple's default runtime. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.
-
 ## Website
 
 `site/` holds the project's product page: static HTML with no build step. The `Pages` workflow publishes it to
 GitHub Pages on pushes to `main` that change `site/`. Preview it locally with `mise run site`, which serves it at
 `http://localhost:8000`; set `PORT` to use another port.
+
+## Releases
+
+Every push to `main` runs the `Release` workflow, which runs `scripts/release.sh`.
+[Cocogitto](https://docs.cocogitto.io/) derives the next version from the Conventional Commits since the last tag
+(configured in `cog.toml`): `fix`, `perf`, and `revert` release a patch, `feat` a minor, and a breaking change a
+major. The workflow builds the package on macOS, pushes the tag, publishes the GitHub release with the archive and
+its checksum, updates the formula in `RobertDeRose/homebrew-tap`, and signs the release with packslip for mise.
+`mise run release:preview` shows the version and notes the next release would publish, changing nothing.
