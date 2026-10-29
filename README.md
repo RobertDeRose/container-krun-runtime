@@ -91,7 +91,7 @@ It prompts for sudo during `mise install` or `mise upgrade`:
 # ~/.config/mise/config.toml
 [tools."packslip:github.com/RobertDeRose/container-krun-runtime"]
 version = "latest"
-postinstall = '"$MISE_TOOL_INSTALL_PATH/container-krun-runtime/cli/container-krun-runtime-setup"'
+postinstall = '"$MISE_TOOL_INSTALL_PATH/cli/container-krun-runtime-setup"'
 ```
 
 ### Upgrade and uninstall
