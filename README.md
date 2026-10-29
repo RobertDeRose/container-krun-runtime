@@ -83,7 +83,9 @@ container system stop && container system start
 
 mise verifies the release's [packslip](https://packslip.dev) signature against this repository before
 installing it. By default mise skips releases younger than 24 hours; name a version, such as
-`packslip:github.com/RobertDeRose/container-krun-runtime@0.9.0`, to install a newer one.
+`packslip:github.com/RobertDeRose/container-krun-runtime@0.9.2`, to install a newer one. mise finds releases
+through jdx's versions index, which can lag a new release; if mise reports that a release has no
+`packslip.sigstore.json`, set `MISE_USE_VERSIONS_HOST=false` to ask GitHub directly.
 
 To run setup automatically whenever mise installs a new version, give the tool a `postinstall` step.
 It prompts for sudo during `mise install` or `mise upgrade`:
