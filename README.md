@@ -1,3 +1,7 @@
+<p align="center">
+  <img src="site/assets/logo.svg" alt="container-krun-runtime" width="120">
+</p>
+
 # container-krun-runtime
 
 `container-krun-runtime` is an experimental Apple Container runtime plugin that boots the normal Apple Container Linux guest stack with [libkrun](https://github.com/libkrun/libkrun) and Hypervisor.framework instead of Virtualization.framework.
@@ -5,6 +9,8 @@
 The project exists to validate and productize one specific advantage demonstrated by the preceding feasibility experiment: Apple's stock Container kernel negotiates `VIRTIO_BALLOON_F_REPORTING` with libkrun, allowing guest-released pages to become reclaimable by macOS while the VM remains running.
 
 No changes to `apple/container` or `apple/containerization` are required. The plugin uses Apple Container's public `runtime` plugin contract.
+
+Product page: <https://robertderose.github.io/container-krun-runtime/>
 
 ## Native vmnet development slice
 
@@ -230,3 +236,9 @@ See [docs/design.md](docs/design.md) for the lifecycle and rationale.
 The v0.1 runtime lifecycle and memory-reclamation path are validated on macOS. The v0.2 `allocationOnly` packet path is also validated end to end for interface configuration, routing, gateway reachability, outbound IPv4, resolver configuration, DNS, statistics, cleanup, and published TCP/UDP ports. The startup readiness race caused by connecting to libkrun's host socket just before vminitd begins serving has been fixed with bounded RPC probes while preserving the overall readiness deadline and successful-RPC requirement.
 
 v0.3.0 completes the copy and Apple block-backed volume baseline. v0.4.0 adds `--init`, published Unix sockets, and SSH agent forwarding. Current development adds live rootfs snapshot/export, multiple allocation-only attachments, persistent `container logs`, filesystem trim through `container clean`, and a non-gating comparison harness against Apple's default runtime. Run the dedicated scripts under `scripts/validate_*.sh` before tagging each slice.
+
+## Website
+
+`site/` holds the project's product page: static HTML with no build step. The `Pages` workflow publishes it to
+GitHub Pages on pushes to `main` that change `site/`. Preview it locally with `mise run site`, which serves it at
+`http://localhost:8000`; set `PORT` to use another port.

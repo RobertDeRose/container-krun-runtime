@@ -88,6 +88,11 @@ run = "scripts/profile_hvf_startup.sh"
 description = "Capture paired Apple/VZ and krun CPU startup profiles"
 run = "scripts/profile_runtime_cpu.sh"
 
+[tasks.site]
+description = "Preview the product site at http://localhost:8000 (set PORT to change it)"
+# Loopback only: the preview is for this Mac, not the local network.
+run = 'python3 -m http.server "${PORT:-8000}" --bind 127.0.0.1 --directory site'
+
 [tasks.test]
 description = "Run the Swift test suite"
 run = "swift test --force-resolved-versions"

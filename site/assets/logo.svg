@@ -1,0 +1,23 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 48 48" width="48" height="48" role="img" aria-label="container-krun-runtime">
+  <title>container-krun-runtime</title>
+  <style>
+    .ink { fill: #16262B; }
+    .box { fill: none; stroke: #16262B; }
+    .page { fill: #12937F; }
+    @media (prefers-color-scheme: dark) {
+      .ink { fill: #E3EBE8; }
+      .box { stroke: #E3EBE8; }
+      .page { fill: #3CC4AE; }
+    }
+  </style>
+  <rect class="box" x="4.5" y="11.5" width="34" height="34" rx="5" stroke-width="3"/>
+  <rect class="ink" x="9" y="16" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="18" y="16" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="9" y="25" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="18" y="25" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="27" y="25" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="9" y="34" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="18" y="34" width="7" height="7" rx="1.2"/>
+  <rect class="ink" x="27" y="34" width="7" height="7" rx="1.2"/>
+  <rect class="page" x="35" y="2" width="10" height="10" rx="1.6"/>
+</svg>
