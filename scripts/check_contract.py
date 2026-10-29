@@ -6,7 +6,7 @@ import sys
 import tomllib
 
 ROOT = Path(__file__).resolve().parents[1]
-main = (ROOT / "Sources/KrunRuntimePlugin/main.swift").read_text()
+main = (ROOT / "Sources/KrunRuntimePlugin/KrunRuntimePlugin.swift").read_text()
 helper_directory = ROOT / "Sources/KrunVMMHelper"
 if (helper_directory / "main.swift").exists():
     print(
