@@ -1,5 +1,8 @@
 <p align="center">
-  <img src="site/assets/logo.svg" alt="container-krun-runtime" width="120">
+  <picture>
+    <source media="(prefers-color-scheme: dark)" srcset="site/assets/logo-dark.svg">
+    <img src="site/assets/logo-light.svg" alt="container-krun-runtime" width="120">
+  </picture>
 </p>
 
 # container-krun-runtime
