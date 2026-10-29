@@ -246,9 +246,19 @@ container run --rm \
   alpine:3.20 sh -c 'echo persisted >/data/value.txt'
 ```
 
-Host directory mounts remain unsupported pending a safe macOS confinement boundary for virtio-fs.
+Host directories are shared through libkrun virtio-fs, read-write or read-only. They assume the stock guest kernel
+is trusted; see the virtio-fs note under [Current scope](#current-scope).
 
-Once feature parity is sufficient, a separately installed user plugin named `container-runtime-linux` can shadow Apple's bundled runtime. v0.2 deliberately does not install itself that way.
+```bash
+container run --rm \
+  --runtime container-krun-runtime \
+  --network none \
+  -v "$PWD:/work:ro" \
+  alpine:3.20 ls /work
+```
+
+A separately installed user plugin named `container-runtime-linux` could shadow Apple's bundled runtime; this runtime
+does not install itself that way.
 
 ## Design constraints
 
