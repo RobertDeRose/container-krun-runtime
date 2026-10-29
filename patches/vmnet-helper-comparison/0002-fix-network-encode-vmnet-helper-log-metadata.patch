@@ -1,0 +1,28 @@
+From 17628d1f1c413d55498cccedb7e88ff847257118 Mon Sep 17 00:00:00 2001
+From: OpenAI <noreply@example.invalid>
+Date: Sat, 26 Sep 2026 23:56:26 +0000
+Subject: [PATCH] fix(network): encode vmnet-helper log metadata
+
+Pass the vmnet-helper socket path through Logger.MetadataValue string interpolation so the benchmark backend compiles with swift-log metadata typing.
+
+Signed-off-by: OpenAI <noreply@example.invalid>
+---
+ Sources/KrunRuntimeCore/KrunVMNetBackend.swift | 2 +-
+ 1 file changed, 1 insertion(+), 1 deletion(-)
+
+diff --git a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+index 96e836c..974861a 100644
+--- a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
++++ b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+@@ -138,7 +138,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+           metadata: [
+             "network_index": "\(index)",
+             "pid": "\(process.processIdentifier)",
+-            "socket": socketPath,
++            "socket": "\(socketPath)",
+           ]
+         )
+         return KrunVMNetBackend(
+-- 
+2.56.0
+

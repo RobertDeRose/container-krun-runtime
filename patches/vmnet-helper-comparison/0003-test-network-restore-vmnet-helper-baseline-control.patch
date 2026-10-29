@@ -1,0 +1,43 @@
+From 5cd9a07fbe81138738379b77eb2880354b86f224 Mon Sep 17 00:00:00 2001
+From: OpenAI <noreply@example.invalid>
+Date: Sun, 27 Sep 2026 02:19:37 +0000
+Subject: [PATCH] test(network): restore vmnet-helper baseline control
+
+- Disable vmnet-helper TSO/checksum offload so the control matches the known pre-native Unixgram path.\n- Label the control as no-offload and preserve benchmark evidence when forced container cleanup times out.
+---
+ Sources/KrunRuntimeCore/KrunVMNetBackend.swift | 5 ++---
+ 1 file changed, 2 insertions(+), 3 deletions(-)
+
+diff --git a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+index 974861a..ec0ffdb 100644
+--- a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
++++ b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+@@ -112,8 +112,6 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+         "--socket", socketPath,
+         "--operation-mode", "shared",
+         "--enable-isolation",
+-        "--enable-tso",
+-        "--enable-checksum-offload",
+         "--start-address", attachment.ipv4Gateway.description,
+         "--end-address", ipv4String(attachment.ipv4Address.upper.value - 1),
+         "--subnet-mask", ipv4String(attachment.ipv4Address.prefix.prefixMask32),
+@@ -139,6 +137,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+             "network_index": "\(index)",
+             "pid": "\(process.processIdentifier)",
+             "socket": "\(socketPath)",
++            "offload": "disabled",
+           ]
+         )
+         return KrunVMNetBackend(
+@@ -148,7 +147,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+             ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
+             socketPath: socketPath,
+             macAddress: macAddress,
+-            features: KrunNetworkFeatures.nativeVMNetTCPOffload
++            features: 0
+           ),
+           stopBackend: {
+             terminate(process)
+-- 
+2.56.0
+

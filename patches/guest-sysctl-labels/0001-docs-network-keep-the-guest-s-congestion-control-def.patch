@@ -1,0 +1,68 @@
+From b6d6175ee3570f36fb51124512e2e74bf8abcbbd Mon Sep 17 00:00:00 2001
+From: Robert DeRose <RobertDeRose@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 21:26:20 -0400
+Subject: [PATCH] docs(network): keep the guest's congestion-control default
+
+Evaluate reno as a runtime default for the native vmnet path and reject
+it: the Apple guest kernel registers only reno and bbr, reno raises bulk
+guest-to-host throughput only while the host has spare capacity, and it
+multiplies local-link round-trip time in every measurement. Leave the
+guest kernel default in place, pass a configured
+net.ipv4.tcp_congestion_control through unchanged, and test that.
+---
+ Sources/KrunRuntimeCore/KrunSpecBuilder.swift |  5 +++++
+ .../KrunRuntimeCoreTests.swift                | 22 +++++++++++++++++++
+ 2 files changed, 27 insertions(+)
+
+diff --git a/Sources/KrunRuntimeCore/KrunSpecBuilder.swift b/Sources/KrunRuntimeCore/KrunSpecBuilder.swift
+index 7a9fe5d..815cf7a 100644
+--- a/Sources/KrunRuntimeCore/KrunSpecBuilder.swift
++++ b/Sources/KrunRuntimeCore/KrunSpecBuilder.swift
+@@ -145,6 +145,11 @@ public enum KrunSpecBuilder {
+ 
+   public static func guestSysctls(_ config: ContainerConfiguration) -> [String: String] {
+     var result = config.sysctls
++    // TCP congestion control is left to the guest kernel's default (bbr; the
++    // kernel registers only reno and bbr). Reno raises bulk throughput on the
++    // native vmnet path only while the host has spare capacity and multiplies
++    // round-trip time on the local link either way, so it is not forced here;
++    // a configured net.ipv4.tcp_congestion_control is passed through unchanged.
+     result["vm.overcommit_memory"] = "1"
+     result["vm.max_map_count"] = "262144"
+     return result
+diff --git a/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift b/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift
+index 732eab2..8093162 100644
+--- a/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift
++++ b/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift
+@@ -46,6 +46,28 @@ import Testing
+   #expect(wrapped.map(\.port) == [0])
+ }
+ 
++@Test func guestSysctlsLeaveCongestionControlToTheGuestUnlessConfigured() throws {
++  let image = ImageDescription(
++    reference: "example.invalid/test:latest",
++    descriptor: Descriptor(
++      mediaType: "application/vnd.oci.image.manifest.v1+json",
++      digest: "sha256:" + String(repeating: "0", count: 64),
++      size: 0
++    )
++  )
++  let process = ProcessConfiguration(executable: "/bin/sh", arguments: ["-c", "true"], environment: [])
++  var container = ContainerConfiguration(id: "sysctl-test", image: image, process: process)
++
++  // No congestion control is injected; the guest kernel default applies.
++  let defaults = KrunSpecBuilder.guestSysctls(container)
++  #expect(defaults["net.ipv4.tcp_congestion_control"] == nil)
++  #expect(defaults["vm.overcommit_memory"] == "1")
++
++  // A configured congestion control is passed through unchanged.
++  container.sysctls["net.ipv4.tcp_congestion_control"] = "reno"
++  #expect(KrunSpecBuilder.guestSysctls(container)["net.ipv4.tcp_congestion_control"] == "reno")
++}
++
+ @Test func specBuilderWrapsOnlyTheInitProcess() throws {
+   let image = ImageDescription(
+     reference: "example.invalid/test:latest",
+-- 
+2.56.0
+

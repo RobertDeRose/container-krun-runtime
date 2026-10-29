@@ -1,0 +1,90 @@
+From 86d3149abc5426121f1d56944b932708d20832d9 Mon Sep 17 00:00:00 2001
+From: OpenAI <openai@example.invalid>
+Date: Sun, 27 Sep 2026 03:25:02 +0000
+Subject: [PATCH] test(network): use vmnet-helper compat offload
+
+- Enable TSO and checksum offload for the vmnet-helper control.
+
+- Match krunkit public Unixgram offloading=on feature negotiation instead of reusing the native-vmnet mask.
+
+- Keep native vmnet and control labels distinct for paired P1/P4/P8 comparison.
+
+Signed-off-by: OpenAI <openai@example.invalid>
+---
+ Sources/KrunRuntimeCore/KrunVMNetBackend.swift        | 6 ++++--
+ Sources/KrunVMMProtocol/KrunVMMConfig.swift           | 6 ++++++
+ Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift | 3 ++-
+ 3 files changed, 12 insertions(+), 3 deletions(-)
+
+diff --git a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+index ec0ffdb..62ff149 100644
+--- a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
++++ b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+@@ -112,6 +112,8 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+         "--socket", socketPath,
+         "--operation-mode", "shared",
+         "--enable-isolation",
++        "--enable-tso",
++        "--enable-checksum-offload",
+         "--start-address", attachment.ipv4Gateway.description,
+         "--end-address", ipv4String(attachment.ipv4Address.upper.value - 1),
+         "--subnet-mask", ipv4String(attachment.ipv4Address.prefix.prefixMask32),
+@@ -137,7 +139,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+             "network_index": "\(index)",
+             "pid": "\(process.processIdentifier)",
+             "socket": "\(socketPath)",
+-            "offload": "disabled",
++            "offload": "krunkit-unixgram-compat",
+           ]
+         )
+         return KrunVMNetBackend(
+@@ -147,7 +149,7 @@ public final class KrunVMNetBackend: @unchecked Sendable {
+             ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
+             socketPath: socketPath,
+             macAddress: macAddress,
+-            features: 0
++            features: KrunNetworkFeatures.unixgramCompatOffload
+           ),
+           stopBackend: {
+             terminate(process)
+diff --git a/Sources/KrunVMMProtocol/KrunVMMConfig.swift b/Sources/KrunVMMProtocol/KrunVMMConfig.swift
+index 3cf1e3f..df2fc19 100644
+--- a/Sources/KrunVMMProtocol/KrunVMMConfig.swift
++++ b/Sources/KrunVMMProtocol/KrunVMMConfig.swift
+@@ -73,6 +73,12 @@ public enum KrunNetworkFeatures {
+   // Keep in sync with VMNET_NATIVE_TCP_FEATURES.
+   public static let nativeVMNetTCPOffload: UInt32 =
+     (1 << 0) | (1 << 1) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12)
++
++  // Match krunkit's public Unixgram `offloading=on` compatibility mask:
++  // CSUM, GUEST_CSUM, GUEST_TSO4, GUEST_UFO, HOST_TSO4, HOST_UFO.
++  // This intentionally differs from the native-vmnet TSO4/TSO6 mask.
++  public static let unixgramCompatOffload: UInt32 =
++    (1 << 0) | (1 << 1) | (1 << 7) | (1 << 10) | (1 << 11) | (1 << 14)
+ }
+ 
+ public enum KrunNetworkBackend: String, Codable, Sendable, Equatable {
+diff --git a/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift b/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift
+index efb37af..cf8de06 100644
+--- a/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift
++++ b/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift
+@@ -63,7 +63,7 @@ import Testing
+     ipv4Mask: "255.255.255.0",
+     socketPath: "/tmp/vmnet-helper.sock",
+     macAddress: [2, 0, 0, 0, 0, 2],
+-    features: KrunNetworkFeatures.nativeVMNetTCPOffload
++    features: KrunNetworkFeatures.unixgramCompatOffload
+   )
+   let decoded = try JSONDecoder().decode(
+     KrunNetworkConfig.self, from: JSONEncoder().encode(network)
+@@ -89,6 +89,7 @@ import Testing
+ 
+ @Test func nativeVMNetAcceptsBoundedStaticConfiguration() throws {
+   #expect(KrunNetworkFeatures.nativeVMNetTCPOffload == 6531)
++  #expect(KrunNetworkFeatures.unixgramCompatOffload == 19587)
+   let network = KrunNetworkConfig(
+     ipv4Gateway: "192.168.200.1", ipv4Mask: "255.255.255.0",
+     macAddress: [2, 0, 0, 0, 0, 1],
+-- 
+2.56.0
+

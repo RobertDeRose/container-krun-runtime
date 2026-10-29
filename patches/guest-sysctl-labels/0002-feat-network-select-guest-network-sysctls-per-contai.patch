@@ -1,0 +1,92 @@
+From bf85ef26e1fe65639802f7e19090f878f58cd338 Mon Sep 17 00:00:00 2001
+From: Robert DeRose <RobertDeRose@users.noreply.github.com>
+Date: Sat, 17 Oct 2026 21:32:05 -0400
+Subject: [PATCH] feat(network): select guest network sysctls per container by
+ label
+
+The CLI exposes labels but not sysctls, so labels under
+com.github.robertderose.container-krun-runtime.sysctl. set guest net.*
+sysctls for that container; other keys and unsafe values are ignored, and
+an explicitly configured sysctl takes precedence. This is how a container
+opts into reno, which raises bulk guest-to-host throughput on the native
+vmnet path when the host has spare capacity at the cost of local-link
+round-trip time; the guest default stays bbr.
+---
+ Sources/KrunRuntimeCore/KrunSpecBuilder.swift | 29 +++++++++++++++----
+ .../KrunRuntimeCoreTests.swift                | 19 ++++++++++--
+ 2 files changed, 39 insertions(+), 9 deletions(-)
+
+diff --git a/Sources/KrunRuntimeCore/KrunSpecBuilder.swift b/Sources/KrunRuntimeCore/KrunSpecBuilder.swift
+index 815cf7a..582ef0b 100644
+--- a/Sources/KrunRuntimeCore/KrunSpecBuilder.swift
++++ b/Sources/KrunRuntimeCore/KrunSpecBuilder.swift
+@@ -143,13 +143,30 @@ public enum KrunSpecBuilder {
+     "/run/container/\(containerID)/rootfs"
+   }
+ 
++  /// Label prefix that selects guest network sysctls per container, since the
++  /// CLI exposes labels but not sysctls: `--label <prefix>net.ipv4.tcp_congestion_control=reno`.
++  public static let sysctlLabelPrefix = "com.github.robertderose.container-krun-runtime.sysctl."
++
+   public static func guestSysctls(_ config: ContainerConfiguration) -> [String: String] {
+-    var result = config.sysctls
+-    // TCP congestion control is left to the guest kernel's default (bbr; the
+-    // kernel registers only reno and bbr). Reno raises bulk throughput on the
+-    // native vmnet path only while the host has spare capacity and multiplies
+-    // round-trip time on the local link either way, so it is not forced here;
+-    // a configured net.ipv4.tcp_congestion_control is passed through unchanged.
++    // Labels first, explicit configuration sysctls over them, runtime
++    // requirements last. Only the guest network stack is reachable by label.
++    var result: [String: String] = [:]
++    for (label, value) in config.labels where label.hasPrefix(sysctlLabelPrefix) {
++      let key = String(label.dropFirst(sysctlLabelPrefix.count))
++      guard key.hasPrefix("net."),
++        key.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "_" }),
++        !value.isEmpty, value.allSatisfy({ !$0.isWhitespace && $0 != "/" })
++      else {
++        continue
++      }
++      result[key] = value
++    }
++    // TCP congestion control is otherwise left to the guest kernel's default
++    // (bbr; the kernel registers only reno and bbr). Reno raises bulk throughput
++    // on the native vmnet path only while the host has spare capacity and
++    // multiplies round-trip time on the local link either way, so it is a
++    // per-container choice through the label above, not a runtime default.
++    result.merge(config.sysctls) { _, configured in configured }
+     result["vm.overcommit_memory"] = "1"
+     result["vm.max_map_count"] = "262144"
+     return result
+diff --git a/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift b/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift
+index 8093162..b48cb53 100644
+--- a/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift
++++ b/Tests/KrunRuntimeCoreTests/KrunRuntimeCoreTests.swift
+@@ -63,9 +63,22 @@ import Testing
+   #expect(defaults["net.ipv4.tcp_congestion_control"] == nil)
+   #expect(defaults["vm.overcommit_memory"] == "1")
+ 
+-  // A configured congestion control is passed through unchanged.
+-  container.sysctls["net.ipv4.tcp_congestion_control"] = "reno"
+-  #expect(KrunSpecBuilder.guestSysctls(container)["net.ipv4.tcp_congestion_control"] == "reno")
++  // A label selects a guest network sysctl per container.
++  let prefix = KrunSpecBuilder.sysctlLabelPrefix
++  container.labels[prefix + "net.ipv4.tcp_congestion_control"] = "reno"
++  // Labels outside the guest network stack, or with unsafe values, are ignored.
++  container.labels[prefix + "kernel.panic"] = "1"
++  container.labels[prefix + "net.ipv4.ip_forward"] = "1 ; echo"
++  container.labels["unrelated"] = "net.ipv4.tcp_congestion_control=reno"
++  let labelled = KrunSpecBuilder.guestSysctls(container)
++  #expect(labelled["net.ipv4.tcp_congestion_control"] == "reno")
++  #expect(labelled["kernel.panic"] == nil)
++  #expect(labelled["net.ipv4.ip_forward"] == nil)
++  #expect(labelled.count == 3)
++
++  // An explicitly configured sysctl wins over a label.
++  container.sysctls["net.ipv4.tcp_congestion_control"] = "bbr"
++  #expect(KrunSpecBuilder.guestSysctls(container)["net.ipv4.tcp_congestion_control"] == "bbr")
+ }
+ 
+ @Test func specBuilderWrapsOnlyTheInitProcess() throws {
+-- 
+2.56.0
+

@@ -1,0 +1,732 @@
+From 4cd9d158a9e4c8b47abd777c3479a647e6caf91b Mon Sep 17 00:00:00 2001
+From: OpenAI <noreply@example.invalid>
+Date: Sat, 26 Sep 2026 22:05:05 +0000
+Subject: [PATCH] test(network): compare native and vmnet-helper backends
+
+- Replace the standalone krunkit/cloud-init control with a benchmark-only vmnet-helper backend in the real runtime path.
+- Keep native vmnet as the default and select the control backend through a one-shot marker consumed at runtime startup.
+- Reuse the sustained P1/P4/P8 benchmark with distinct native and vmnet-helper labels while preserving paired A/B ordering.
+
+Signed-off-by: OpenAI <noreply@example.invalid>
+---
+ .../KrunRuntimeCore/KrunRuntimeService.swift  |  32 ++-
+ .../KrunRuntimeCore/KrunVMController.swift    |   9 +-
+ .../KrunRuntimeCore/KrunVMNetBackend.swift    | 230 ++++++++++++++++--
+ Sources/KrunRuntimePlugin/main.swift          |  19 +-
+ Sources/KrunVMMHelper/KrunVMMHelperMain.swift |  69 ++++--
+ .../KrunVMMHelper/NativeVMNetPrivileges.swift |   7 +-
+ .../KrunNativeVMNetValidation.swift           |   3 +
+ Sources/KrunVMMProtocol/KrunVMMConfig.swift   |  11 +
+ .../KrunVMMProtocolTests.swift                |  28 +++
+ 9 files changed, 358 insertions(+), 50 deletions(-)
+
+diff --git a/Sources/KrunRuntimeCore/KrunRuntimeService.swift b/Sources/KrunRuntimeCore/KrunRuntimeService.swift
+index e3a2bdb..beb55d6 100644
+--- a/Sources/KrunRuntimeCore/KrunRuntimeService.swift
++++ b/Sources/KrunRuntimeCore/KrunRuntimeService.swift
+@@ -36,6 +36,7 @@ public actor KrunRuntimeService {
+   private let connection: xpc_connection_t
+   private let log: Logger
+   private let helperPath: String
++  private let networkBackendMode: KrunNetworkBackendMode
+ 
+   private var state: State = .created
+   private var vm: KrunVMController?
+@@ -46,6 +47,7 @@ public actor KrunRuntimeService {
+   private var stopWaiters: [CheckedContinuation<Void, Never>] = []
+   private var networkSessions: [XPCClientSession] = []
+   private var networkAttachments: [Attachment] = []
++  private var networkBackends: [KrunVMNetBackend] = []
+   private var socketForwarders: [SocketForwarderResult] = []
+   private var lifecycleStartedAt: ContinuousClock.Instant?
+ 
+@@ -53,11 +55,13 @@ public actor KrunRuntimeService {
+     root: URL,
+     connection: xpc_connection_t,
+     helperPath: String,
++    networkBackendMode: KrunNetworkBackendMode = .nativeVMNet,
+     log: Logger
+   ) {
+     self.root = root
+     self.connection = connection
+     self.helperPath = helperPath
++    self.networkBackendMode = networkBackendMode
+     self.log = log
+   }
+ 
+@@ -89,6 +93,7 @@ public actor KrunRuntimeService {
+     let networkResources = try await prepareNetworking(
+       config: containerConfig,
+       networkInfos: networkInfos,
++      bundle: bundle,
+       startedAt: startedAt
+     )
+     let controller: KrunVMController
+@@ -96,13 +101,14 @@ public actor KrunRuntimeService {
+       controller = try await KrunVMController.boot(
+         bundle: bundle,
+         helperPath: helperPath,
+-        networkConfigs: networkResources.configs,
++        networkConfigs: networkResources.backends.map(\.networkConfig),
+         networkAttachments: networkResources.attachments,
+         dynamicEnv: dynamicEnv,
+         lifecycleStartedAt: startedAt,
+         log: log
+       )
+     } catch {
++      for backend in networkResources.backends { backend.stop() }
+       for session in networkResources.sessions { session.close() }
+       throw error
+     }
+@@ -115,6 +121,7 @@ public actor KrunRuntimeService {
+       )
+     } catch {
+       await controller.shutdownGuest()
++      for backend in networkResources.backends { backend.stop() }
+       for session in networkResources.sessions { session.close() }
+       throw error
+     }
+@@ -139,6 +146,7 @@ public actor KrunRuntimeService {
+     self.copyPortPool = copyPool
+     self.networkSessions = networkResources.sessions
+     self.networkAttachments = networkResources.attachments
++    self.networkBackends = networkResources.backends
+     self.socketForwarders = forwarders
+     self.processes = [
+       containerConfig.id: ProcessRecord(
+@@ -754,6 +762,8 @@ public actor KrunRuntimeService {
+     }
+     await stopSocketForwarders()
+     await controller.shutdownVMM()
++    for backend in networkBackends { backend.stop() }
++    networkBackends = []
+     for session in networkSessions { session.close() }
+     networkSessions = []
+     networkAttachments = []
+@@ -875,12 +885,13 @@ public actor KrunRuntimeService {
+   private struct NetworkResources {
+     let sessions: [XPCClientSession]
+     let attachments: [Attachment]
+-    let configs: [KrunNetworkConfig]
++    let backends: [KrunVMNetBackend]
+   }
+ 
+   private func prepareNetworking(
+     config: ContainerConfiguration,
+     networkInfos: [NetworkBootstrapInfo],
++    bundle: ContainerResource.Bundle,
+     startedAt: ContinuousClock.Instant
+   ) async throws -> NetworkResources {
+     guard config.networks.count == networkInfos.count else {
+@@ -890,13 +901,13 @@ public actor KrunRuntimeService {
+       )
+     }
+     guard !networkInfos.isEmpty else {
+-      return NetworkResources(sessions: [], attachments: [], configs: [])
++      return NetworkResources(sessions: [], attachments: [], backends: [])
+     }
+ 
+     let resourceClient = ContainerAPIClient.NetworkClient()
+     var sessions: [XPCClientSession] = []
+     var attachments: [Attachment] = []
+-    var configs: [KrunNetworkConfig] = []
++    var backends: [KrunVMNetBackend] = []
+     do {
+       for (index, info) in networkInfos.enumerated() {
+         let attachmentConfig = config.networks[index]
+@@ -958,15 +969,24 @@ public actor KrunRuntimeService {
+             variant: attachment.variant
+           )
+         }
+-        configs.append(try KrunVMNetBackend.configuration(for: attachment))
++        let backend = try await KrunVMNetBackend.start(
++          attachment: attachment,
++          index: index,
++          mode: networkBackendMode,
++          logPath: bundle.filePath(for: "krun-vmnet-\(index).log"),
++          lifecycleStartedAt: startedAt,
++          log: log
++        )
+         attachments.append(attachment)
++        backends.append(backend)
+       }
+       return NetworkResources(
+         sessions: sessions,
+         attachments: attachments,
+-        configs: configs
++        backends: backends
+       )
+     } catch {
++      for backend in backends { backend.stop() }
+       for session in sessions { session.close() }
+       throw error
+     }
+diff --git a/Sources/KrunRuntimeCore/KrunVMController.swift b/Sources/KrunRuntimeCore/KrunVMController.swift
+index 320b2e8..82b1e2e 100644
+--- a/Sources/KrunRuntimeCore/KrunVMController.swift
++++ b/Sources/KrunRuntimeCore/KrunVMController.swift
+@@ -91,9 +91,10 @@ public final class KrunVMController: @unchecked Sendable {
+           message: "network config and attachment counts do not match"
+         )
+       }
+-      let nativeVMNet = !networkConfigs.isEmpty
+-      let selectedHelper = nativeVMNet ? KrunDefaults.nativeHelperPath : helperPath
+-      let selectedLibkrun = nativeVMNet ? KrunDefaults.nativeLibkrunPath : libkrunPath
++      let managedNetwork = !networkConfigs.isEmpty
++      let nativeVMNet = networkConfigs.contains { $0.backend == .nativeVMNetShared }
++      let selectedHelper = managedNetwork ? KrunDefaults.nativeHelperPath : helperPath
++      let selectedLibkrun = managedNetwork ? KrunDefaults.nativeLibkrunPath : libkrunPath
+       if nativeVMNet {
+         guard getuid() != 0 else {
+           throw ContainerizationError(.unsupported, message: "run Apple Container as an unprivileged user")
+@@ -126,7 +127,7 @@ public final class KrunVMController: @unchecked Sendable {
+ 
+       guard FileManager.default.isReadableFile(atPath: selectedHelper) else {
+         throw ContainerizationError(
+-          .notFound, message: "libkrun helper is not readable at \(selectedHelper); run mise run native:install for native vmnet")
++          .notFound, message: "libkrun helper is not readable at \(selectedHelper); run mise run native:install")
+       }
+       guard FileManager.default.isReadableFile(atPath: selectedLibkrun) else {
+         throw ContainerizationError(.notFound, message: "libkrun is not readable at \(selectedLibkrun)")
+diff --git a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+index 2117635..96e836c 100644
+--- a/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
++++ b/Sources/KrunRuntimeCore/KrunVMNetBackend.swift
+@@ -2,16 +2,45 @@ import ContainerResource
+ import ContainerizationError
+ import Foundation
+ import KrunVMMProtocol
++import Logging
+ 
+-/// Translate an Apple-owned attachment into native libkrun configuration.
+-/// No network allocation, packet helper, or second IPAM lives in the runtime.
+-public enum KrunVMNetBackend {
+-  public static func configuration(for attachment: Attachment) throws -> KrunNetworkConfig {
++#if canImport(Darwin)
++  import Darwin
++#endif
++
++/// Runtime network selection. The vmnet-helper mode exists only to benchmark
++/// the same Apple-kernel/vminitd VM against the pre-native Unixgram datapath.
++public enum KrunNetworkBackendMode: Sendable, Equatable {
++  case nativeVMNet
++  case vmnetHelperControl
++}
++
++public final class KrunVMNetBackend: @unchecked Sendable {
++  public let networkConfig: KrunNetworkConfig
++
++  private let stopBackend: () -> Void
++
++  private init(
++    networkConfig: KrunNetworkConfig,
++    stopBackend: @escaping () -> Void = {}
++  ) {
++    self.networkConfig = networkConfig
++    self.stopBackend = stopBackend
++  }
++
++  public static func start(
++    attachment: Attachment,
++    index: Int,
++    mode: KrunNetworkBackendMode,
++    logPath: URL,
++    lifecycleStartedAt: ContinuousClock.Instant,
++    log: Logger
++  ) async throws -> KrunVMNetBackend {
+     #if !os(macOS)
+       throw KrunFeatureGate.unsupported("networking outside macOS")
+     #else
+       guard #available(macOS 26, *) else {
+-        throw KrunFeatureGate.unsupported("native vmnet on macOS versions older than 26")
++        throw KrunFeatureGate.unsupported("networking on macOS versions older than 26")
+       }
+       guard let macAddress = attachment.macAddress else {
+         throw ContainerizationError(
+@@ -19,27 +48,192 @@ public enum KrunVMNetBackend {
+           message: "network attachment \(attachment.network) does not have a MAC address"
+         )
+       }
+-      switch attachment.variant {
+-      case "allocationOnly":
+-        return KrunNetworkConfig(
+-          ipv4Gateway: attachment.ipv4Gateway.description,
+-          ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
++      guard attachment.variant == "allocationOnly" else {
++        if attachment.variant == "reserved" {
++          throw ContainerizationError(
++            .unsupported,
++            message:
++              "network \(attachment.network) is incompatible with container-krun-runtime; "
++              + "use container-network-vmnet with variant=allocationOnly"
++          )
++        }
++        throw KrunFeatureGate.unsupported(
++          "network variant \(attachment.variant ?? "unknown")"
++        )
++      }
++
++      switch mode {
++      case .nativeVMNet:
++        return KrunVMNetBackend(
++          networkConfig: KrunNetworkConfig(
++            backend: .nativeVMNetShared,
++            ipv4Gateway: attachment.ipv4Gateway.description,
++            ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
++            macAddress: macAddress.bytes,
++            features: KrunNetworkFeatures.nativeVMNetTCPOffload
++          )
++        )
++      case .vmnetHelperControl:
++        return try await startVMNetHelperControl(
++          attachment: attachment,
+           macAddress: macAddress.bytes,
+-          features: KrunNetworkFeatures.nativeVMNetTCPOffload
++          index: index,
++          logPath: logPath,
++          lifecycleStartedAt: lifecycleStartedAt,
++          log: log
+         )
+-      case "reserved":
++      }
++    #endif
++  }
++
++  public func stop() {
++    stopBackend()
++  }
++
++  #if os(macOS)
++    @available(macOS 26, *)
++    private static func startVMNetHelperControl(
++      attachment: Attachment,
++      macAddress: [UInt8],
++      index: Int,
++      logPath: URL,
++      lifecycleStartedAt: ContinuousClock.Instant,
++      log: Logger
++    ) async throws -> KrunVMNetBackend {
++      let helperPath = try resolveHelperPath()
++      let directory = try makeDirectory()
++      let socketPath = directory.appendingPathComponent("net\(index).sock").path
++
++      FileManager.default.createFile(atPath: logPath.path, contents: nil)
++      let logHandle = try FileHandle(forWritingTo: logPath)
++      let process = Foundation.Process()
++      process.executableURL = URL(fileURLWithPath: helperPath)
++      process.arguments = [
++        "--socket", socketPath,
++        "--operation-mode", "shared",
++        "--enable-isolation",
++        "--enable-tso",
++        "--enable-checksum-offload",
++        "--start-address", attachment.ipv4Gateway.description,
++        "--end-address", ipv4String(attachment.ipv4Address.upper.value - 1),
++        "--subnet-mask", ipv4String(attachment.ipv4Address.prefix.prefixMask32),
++      ]
++      process.standardInput = FileHandle.nullDevice
++      process.standardOutput = logHandle
++      process.standardError = logHandle
++
++      do {
++        KrunLifecycleTrace.mark(
++          log,
++          startedAt: lifecycleStartedAt,
++          event: "vmnet-helper control launch",
++          metadata: ["network_index": "\(index)"]
++        )
++        try process.run()
++        try await waitUntilReady(process: process, socketPath: socketPath, logPath: logPath)
++        KrunLifecycleTrace.mark(
++          log,
++          startedAt: lifecycleStartedAt,
++          event: "vmnet-helper control ready",
++          metadata: [
++            "network_index": "\(index)",
++            "pid": "\(process.processIdentifier)",
++            "socket": socketPath,
++          ]
++        )
++        return KrunVMNetBackend(
++          networkConfig: KrunNetworkConfig(
++            backend: .unixgram,
++            ipv4Gateway: attachment.ipv4Gateway.description,
++            ipv4Mask: ipv4String(attachment.ipv4Address.prefix.prefixMask32),
++            socketPath: socketPath,
++            macAddress: macAddress,
++            features: KrunNetworkFeatures.nativeVMNetTCPOffload
++          ),
++          stopBackend: {
++            terminate(process)
++            try? logHandle.close()
++            try? FileManager.default.removeItem(at: directory)
++          }
++        )
++      } catch {
++        terminate(process)
++        try? logHandle.close()
++        try? FileManager.default.removeItem(at: directory)
++        throw error
++      }
++    }
++  #endif
++
++  private static func makeDirectory() throws -> URL {
++    let directory = URL(
++      fileURLWithPath: "/tmp/container-krun-net-\(UUID().uuidString)",
++      isDirectory: true
++    )
++    try FileManager.default.createDirectory(
++      at: directory,
++      withIntermediateDirectories: false,
++      attributes: [.posixPermissions: 0o700]
++    )
++    return directory
++  }
++
++  private static func resolveHelperPath() throws -> String {
++    for candidate in [
++      "/opt/homebrew/opt/vmnet-helper/libexec/vmnet-helper",
++      "/usr/local/opt/vmnet-helper/libexec/vmnet-helper",
++      "/opt/vmnet-helper/bin/vmnet-helper",
++    ] where FileManager.default.isExecutableFile(atPath: candidate) {
++      return candidate
++    }
++    throw ContainerizationError(
++      .notFound,
++      message: "vmnet-helper control requires vmnet-helper to be installed"
++    )
++  }
++
++  private static func waitUntilReady(
++    process: Foundation.Process,
++    socketPath: String,
++    logPath: URL
++  ) async throws {
++    let deadline = ContinuousClock.now.advanced(by: .seconds(30))
++    repeat {
++      guard process.isRunning else {
++        let contents = (try? String(contentsOf: logPath, encoding: .utf8)) ?? ""
+         throw ContainerizationError(
+-          .unsupported,
+-          message: "network \(attachment.network) is incompatible with native libkrun vmnet; "
+-            + "use container-network-vmnet with variant=allocationOnly"
++          .internalError,
++          message: "vmnet-helper exited before its socket was ready: \(contents)"
+         )
+-      default:
+-        throw KrunFeatureGate.unsupported("network variant \(attachment.variant ?? "unknown")")
+       }
+-    #endif
++      if FileManager.default.fileExists(atPath: socketPath) {
++        return
++      }
++      try await Task.sleep(for: .milliseconds(50))
++    } while ContinuousClock.now < deadline
++
++    let contents = (try? String(contentsOf: logPath, encoding: .utf8)) ?? ""
++    throw ContainerizationError(
++      .timeout,
++      message: "vmnet-helper did not create \(socketPath) within 30 seconds; helper log: \(contents)"
++    )
+   }
+ 
+   private static func ipv4String(_ value: UInt32) -> String {
+     [24, 16, 8, 0].map { String((value >> $0) & 0xff) }.joined(separator: ".")
+   }
++
++  private static func terminate(_ process: Foundation.Process) {
++    guard process.isRunning else { return }
++    process.terminate()
++    for _ in 0..<100 where process.isRunning {
++      Thread.sleep(forTimeInterval: 0.05)
++    }
++    if process.isRunning {
++      #if canImport(Darwin)
++        kill(process.processIdentifier, SIGKILL)
++      #endif
++    }
++    process.waitUntilExit()
++  }
+ }
+diff --git a/Sources/KrunRuntimePlugin/main.swift b/Sources/KrunRuntimePlugin/main.swift
+index 7f0d646..ebd74e1 100644
+--- a/Sources/KrunRuntimePlugin/main.swift
++++ b/Sources/KrunRuntimePlugin/main.swift
+@@ -49,13 +49,26 @@ extension KrunRuntimePlugin {
+ 
+       nonisolated(unsafe) let anonymousConnection = xpc_connection_create(nil, nil)
+       let executable = URL(fileURLWithPath: CommandLine.arguments[0]).resolvingSymlinksInPath()
+-      let helperPath = executable.deletingLastPathComponent().appendingPathComponent(
+-        "container-krun-vmm-helper"
+-      ).path
++      let binDirectory = executable.deletingLastPathComponent()
++      let helperPath = binDirectory.appendingPathComponent("container-krun-vmm-helper").path
++      let controlMarker = binDirectory.appendingPathComponent(".vmnet-helper-control")
++      let controlToken = try? String(contentsOf: controlMarker, encoding: .utf8)
++      let networkBackendMode: KrunNetworkBackendMode =
++        controlToken == "vmnet-helper-control-v1\n" ? .vmnetHelperControl : .nativeVMNet
++      if controlToken != nil {
++        try? FileManager.default.removeItem(at: controlMarker)
++      }
++      log.info(
++        "selected network backend",
++        metadata: [
++          "backend": networkBackendMode == .vmnetHelperControl ? "vmnet-helper-control" : "native-vmnet"
++        ]
++      )
+       let service = KrunRuntimeService(
+         root: URL(fileURLWithPath: root),
+         connection: anonymousConnection,
+         helperPath: helperPath,
++        networkBackendMode: networkBackendMode,
+         log: log
+       )
+ 
+diff --git a/Sources/KrunVMMHelper/KrunVMMHelperMain.swift b/Sources/KrunVMMHelper/KrunVMMHelperMain.swift
+index d5069c9..0e9bc38 100644
+--- a/Sources/KrunVMMHelper/KrunVMMHelperMain.swift
++++ b/Sources/KrunVMMHelper/KrunVMMHelperMain.swift
+@@ -55,6 +55,10 @@ private final class KrunLibrary: @unchecked Sendable {
+       UInt32, UnsafePointer<CChar>?, UnsafePointer<CChar>?,
+       UnsafeMutablePointer<UInt8>?, UInt32, UInt32
+     ) -> Int32
++  typealias AddNetUnixgram =
++    @convention(c) (
++      UInt32, UnsafePointer<CChar>?, Int32, UnsafeMutablePointer<UInt8>?, UInt32, UInt32
++    ) -> Int32
+   typealias AddConsole = @convention(c) (UInt32, Int32, Int32, Int32) -> Int32
+   typealias SetKernel =
+     @convention(c) (
+@@ -80,6 +84,7 @@ private final class KrunLibrary: @unchecked Sendable {
+   let addVsock: AddVsock
+   let addVsockPort: AddVsockPort
+   let addNetVMNetShared: AddNetVMNetShared
++  let addNetUnixgram: AddNetUnixgram
+   let disableImplicitConsole: ToggleImplicitDevice
+   let addConsole: AddConsole
+   let setKernel: SetKernel
+@@ -106,6 +111,8 @@ private final class KrunLibrary: @unchecked Sendable {
+     self.addVsockPort = try Self.load(handle, "krun_add_vsock_port2", as: AddVsockPort.self)
+     self.addNetVMNetShared = try Self.load(
+       handle, "krun_add_net_vmnet_shared", as: AddNetVMNetShared.self)
++    self.addNetUnixgram = try Self.load(
++      handle, "krun_add_net_unixgram", as: AddNetUnixgram.self)
+     self.disableImplicitConsole = try Self.load(
+       handle, "krun_disable_implicit_console", as: ToggleImplicitDevice.self)
+     self.addConsole = try Self.load(handle, "krun_add_virtio_console_default", as: AddConsole.self)
+@@ -212,30 +219,60 @@ private func run(config: KrunVMMConfig, startedAt: ContinuousClock.Instant) thro
+   defer { _ = krun.freeContext(context) }
+   HelperLifecycleTrace.mark(startedAt: startedAt, event: "context created", metadata: ["default_firmware": "disabled"])
+ 
+-  // Only native interface creation is privileged. No VM files or guest CPU
+-  // execution are touched until the irreversible UID/GID drop has completed.
++  // Only native interface creation is privileged. Unixgram control backends
++  // are configured by an ordinary helper process and need no privilege drop.
+   for (index, network) in config.networks.enumerated() {
++    guard network.macAddress.count == 6 else {
++      throw KrunError(description: "network \(index) MAC address must contain 6 bytes")
++    }
+     var mac = network.macAddress
+-    try network.ipv4Gateway.withCString { gateway in
+-      try network.ipv4Mask.withCString { mask in
++    switch network.backend {
++    case .nativeVMNetShared:
++      try network.ipv4Gateway.withCString { gateway in
++        try network.ipv4Mask.withCString { mask in
++          try mac.withUnsafeMutableBufferPointer { bytes in
++            try checked(
++              krun.addNetVMNetShared(
++                context, gateway, mask, bytes.baseAddress, network.features, network.flags
++              ),
++              "krun_add_net_vmnet_shared(net\(index))"
++            )
++          }
++        }
++      }
++      HelperLifecycleTrace.mark(
++        startedAt: startedAt, event: "native vmnet interface ready",
++        metadata: [
++          "backend": "libkrun-vmnet-shared", "network_index": "\(index)",
++          "api": "krun_add_net_vmnet_shared", "vmnet_api": "vmnet_start_interface",
++          "guest_dhcp": "false", "isolated": "true",
++          "gateway": network.ipv4Gateway, "netmask": network.ipv4Mask,
++          "features": "\(network.features)", "flags": "\(network.flags)",
++        ]
++      )
++    case .unixgram:
++      guard let socketPath = network.socketPath, !socketPath.isEmpty else {
++        throw KrunError(description: "unixgram network \(index) is missing socketPath")
++      }
++      try socketPath.withCString { path in
+         try mac.withUnsafeMutableBufferPointer { bytes in
+           try checked(
+-            krun.addNetVMNetShared(context, gateway, mask, bytes.baseAddress, network.features, network.flags),
+-            "krun_add_net_vmnet_shared(net\(index))"
++            krun.addNetUnixgram(
++              context, path, -1, bytes.baseAddress, network.features, network.flags
++            ),
++            "krun_add_net_unixgram(net\(index))"
+           )
+         }
+       }
++      HelperLifecycleTrace.mark(
++        startedAt: startedAt, event: "vmnet-helper control interface ready",
++        metadata: [
++          "backend": "unixgram-vmnet-helper", "network_index": "\(index)",
++          "api": "krun_add_net_unixgram", "socket": socketPath,
++          "features": "\(network.features)", "flags": "\(network.flags)",
++        ]
++      )
+     }
+-    HelperLifecycleTrace.mark(
+-      startedAt: startedAt, event: "native vmnet interface ready",
+-      metadata: [
+-        "backend": "libkrun-vmnet-shared", "network_index": "\(index)",
+-        "api": "krun_add_net_vmnet_shared", "vmnet_api": "vmnet_start_interface",
+-        "guest_dhcp": "false", "isolated": "true",
+-        "gateway": network.ipv4Gateway, "netmask": network.ipv4Mask,
+-        "features": "\(network.features)", "flags": "\(network.flags)",
+-      ]
+-    )
+   }
+   if let target {
+     try NativeVMNetPrivileges.drop(to: target)
+diff --git a/Sources/KrunVMMHelper/NativeVMNetPrivileges.swift b/Sources/KrunVMMHelper/NativeVMNetPrivileges.swift
+index 7e6bf54..58bad09 100644
+--- a/Sources/KrunVMMHelper/NativeVMNetPrivileges.swift
++++ b/Sources/KrunVMMHelper/NativeVMNetPrivileges.swift
+@@ -66,8 +66,9 @@ enum NativeVMNetPrivileges {
+   }
+ 
+   static func validate(config: KrunVMMConfig) throws -> Identity? {
++    let nativeNetworks = config.networks.filter { $0.backend == .nativeVMNetShared }
+     guard geteuid() == 0 else {
+-      guard config.networks.isEmpty else {
++      guard nativeNetworks.isEmpty else {
+         throw PrivilegeError(
+           description:
+             "native vmnet must start through the installed privileged helper; run mise run native:install"
+@@ -82,7 +83,7 @@ enum NativeVMNetPrivileges {
+         throw PrivilegeError(description: "native vmnet requires macOS 26 or newer")
+       }
+       let caller = try sudoIdentity()
+-      guard !config.networks.isEmpty, config.networks.count <= 16 else {
++      guard !nativeNetworks.isEmpty, nativeNetworks.count == config.networks.count, nativeNetworks.count <= 16 else {
+         throw PrivilegeError(
+           description: "privileged helper requires between 1 and 16 native vmnet attachments")
+       }
+@@ -95,7 +96,7 @@ enum NativeVMNetPrivileges {
+       }
+       try requireTrustedPath(KrunDefaults.nativeHelperPath)
+       try requireTrustedPath(KrunDefaults.nativeLibkrunPath)
+-      for network in config.networks {
++      for network in nativeNetworks {
+         try network.validateNativeVMNet()
+       }
+       return caller
+diff --git a/Sources/KrunVMMProtocol/KrunNativeVMNetValidation.swift b/Sources/KrunVMMProtocol/KrunNativeVMNetValidation.swift
+index 52fadcd..1326d04 100644
+--- a/Sources/KrunVMMProtocol/KrunNativeVMNetValidation.swift
++++ b/Sources/KrunVMMProtocol/KrunNativeVMNetValidation.swift
+@@ -9,6 +9,9 @@ extension KrunNetworkConfig {
+   /// validates the IPv4 subnet and accepts only the bounded software-TX
+   /// feature set, never a partial feature combination.
+   public func validateNativeVMNet() throws {
++    guard backend == .nativeVMNetShared, socketPath == nil else {
++      throw KrunNativeVMNetError(description: "native vmnet requires the native shared backend")
++    }
+     guard macAddress.count == 6, macAddress != [UInt8](repeating: 0, count: 6),
+       macAddress[0] & 1 == 0
+     else {
+diff --git a/Sources/KrunVMMProtocol/KrunVMMConfig.swift b/Sources/KrunVMMProtocol/KrunVMMConfig.swift
+index b509aaf..3cf1e3f 100644
+--- a/Sources/KrunVMMProtocol/KrunVMMConfig.swift
++++ b/Sources/KrunVMMProtocol/KrunVMMConfig.swift
+@@ -75,22 +75,33 @@ public enum KrunNetworkFeatures {
+     (1 << 0) | (1 << 1) | (1 << 7) | (1 << 8) | (1 << 11) | (1 << 12)
+ }
+ 
++public enum KrunNetworkBackend: String, Codable, Sendable, Equatable {
++  case nativeVMNetShared
++  case unixgram
++}
++
+ public struct KrunNetworkConfig: Codable, Sendable, Equatable {
++  public let backend: KrunNetworkBackend
+   public let ipv4Gateway: String
+   public let ipv4Mask: String
++  public let socketPath: String?
+   public let macAddress: [UInt8]
+   public let features: UInt32
+   public let flags: UInt32
+ 
+   public init(
++    backend: KrunNetworkBackend = .nativeVMNetShared,
+     ipv4Gateway: String,
+     ipv4Mask: String,
++    socketPath: String? = nil,
+     macAddress: [UInt8],
+     features: UInt32 = 0,
+     flags: UInt32 = 0
+   ) {
++    self.backend = backend
+     self.ipv4Gateway = ipv4Gateway
+     self.ipv4Mask = ipv4Mask
++    self.socketPath = socketPath
+     self.macAddress = macAddress
+     self.features = features
+     self.flags = flags
+diff --git a/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift b/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift
+index 360ea0e..efb37af 100644
+--- a/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift
++++ b/Tests/KrunVMMProtocolTests/KrunVMMProtocolTests.swift
+@@ -50,10 +50,27 @@ import Testing
+     ipv4Mask: "255.255.255.0",
+     macAddress: [0x02, 0x00, 0x00, 0x00, 0x00, 0x02]
+   )
++  #expect(network.backend == .nativeVMNetShared)
++  #expect(network.socketPath == nil)
+   #expect(network.features == 0)
+   #expect(network.flags == 0)
+ }
+ 
++@Test func unixgramNetworkConfigRoundTrips() throws {
++  let network = KrunNetworkConfig(
++    backend: .unixgram,
++    ipv4Gateway: "192.168.200.1",
++    ipv4Mask: "255.255.255.0",
++    socketPath: "/tmp/vmnet-helper.sock",
++    macAddress: [2, 0, 0, 0, 0, 2],
++    features: KrunNetworkFeatures.nativeVMNetTCPOffload
++  )
++  let decoded = try JSONDecoder().decode(
++    KrunNetworkConfig.self, from: JSONEncoder().encode(network)
++  )
++  #expect(decoded == network)
++}
++
+ @Test func defaultsReserveControlAndStdioSeparately() {
+   #expect(KrunDefaults.controlPort < KrunDefaults.firstIOPort)
+   #expect(KrunDefaults.ioPortCount >= 3)
+@@ -83,6 +100,17 @@ import Testing
+   #expect(json["socketPath"] == nil)
+ }
+ 
++@Test func nativeVMNetRejectsUnixgramBackend() {
++  let network = KrunNetworkConfig(
++    backend: .unixgram,
++    ipv4Gateway: "192.168.200.1",
++    ipv4Mask: "255.255.255.0",
++    socketPath: "/tmp/vmnet-helper.sock",
++    macAddress: [2, 0, 0, 0, 0, 1]
++  )
++  #expect(throws: KrunNativeVMNetError.self) { try network.validateNativeVMNet() }
++}
++
+ @Test func nativeVMNetRejectsInvalidMACAndPartialOffloads() {
+   for mac: [UInt8] in [[], [2, 0], [0, 0, 0, 0, 0, 0], [1, 0, 0, 0, 0, 1]] {
+     let network = KrunNetworkConfig(
+-- 
+2.56.0
+
