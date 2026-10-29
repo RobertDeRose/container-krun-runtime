@@ -12,6 +12,11 @@ class ContainerKrunRuntime < Formula
   depends_on arch: :arm64
   depends_on macos: :tahoe
 
+  # Install the signed binaries byte for byte. libkrun's @rpath install name
+  # is unused (the helper dlopens it by path); this stops Homebrew from
+  # rewriting it, which would alter code that setup installs as root.
+  preserve_rpath
+
   def install
     # The archive is the package setup installs; keep it whole under libexec.
     libexec.install Dir["*"], ".container-krun-runtime"

@@ -36,6 +36,11 @@ install -m 0755 "$build/container-krun-runtime" "$stage/bin/container-krun-runti
 install -m 0755 "$build/container-krun-vmm-helper" "$stage/bin/container-krun-vmm-helper"
 install -m 0644 "$dylib" "$stage/lib/libkrun.dylib"
 python3 "$root/scripts/macho_trust.py" --normalize "$stage/bin/container-krun-vmm-helper" "$stage/lib/libkrun.dylib"
+# The helper dlopens libkrun by absolute path, so its install name is never
+# used. An @rpath name is one Homebrew leaves alone (see preserve_rpath in the
+# formula) instead of rewriting, and re-signing, the library on install.
+install_name_tool -id @rpath/libkrun.dylib "$stage/lib/libkrun.dylib"
+python3 "$root/scripts/macho_trust.py" "$stage/lib/libkrun.dylib" >/dev/null
 codesign --force --sign - --timestamp=none "$stage/bin/container-krun-runtime"
 codesign --force --sign - --timestamp=none "$stage/lib/libkrun.dylib"
 codesign --force --sign - --timestamp=none --entitlements "$root/signing/hypervisor.entitlements" "$stage/bin/container-krun-vmm-helper"
