@@ -31,7 +31,7 @@ recorded_sha="$(awk -F= '$1=="source_build_sha256" {print $2}' "$provenance")"
 rm -rf "$stage"
 # Explicit modes throughout: setup copies these files as root, so anything left
 # to the umask would become unreadable or wrongly writable afterwards.
-install -d -m 0755 "$stage" "$stage/bin" "$stage/lib" "$stage/cli" "$stage/share/licenses/libkrun"
+install -d -m 0755 "$stage" "$stage/bin" "$stage/lib" "$stage/cli" "$stage/share/licenses/libkrun" "$stage/share/licenses/container-krun-runtime"
 install -m 0755 "$build/container-krun-runtime" "$stage/bin/container-krun-runtime"
 install -m 0755 "$build/container-krun-vmm-helper" "$stage/bin/container-krun-vmm-helper"
 install -m 0644 "$dylib" "$stage/lib/libkrun.dylib"
@@ -54,7 +54,8 @@ install -m 0644 "$provenance" "$stage/lib/libkrun.provenance"
   echo "runtime_sha256=$(shasum -a 256 "$stage/bin/container-krun-runtime" | awk '{print $1}')"
 } >>"$stage/lib/libkrun.provenance"
 install -m 0644 "$root/plugin/container-krun-runtime/config.toml" "$stage/config.toml"
-install -m 0644 "$root/LICENSE" "$stage/LICENSE"
+# Not at the top level: Homebrew moves a top-level LICENSE out of the package.
+install -m 0644 "$root/LICENSE" "$stage/share/licenses/container-krun-runtime/LICENSE"
 install -m 0644 "$source_dir/LICENSE" "$stage/share/licenses/libkrun/LICENSE"
 install -m 0755 "$root/scripts/setup.sh" "$stage/cli/container-krun-runtime-setup"
 # Marks a directory as this package, so setup never replaces anything else.

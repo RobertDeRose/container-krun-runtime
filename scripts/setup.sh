@@ -118,7 +118,7 @@ cleanup() {
 trap cleanup EXIT
 # Only the plugin's own files: not cli/, and not what an installer such as mise
 # adds beside them.
-as_owner cp -R "$package/.$name" "$package/config.toml" "$package/LICENSE" \
+as_owner cp -R "$package/.$name" "$package/config.toml" \
   "$package/bin" "$package/lib" "$package/share" "$temporary/"
 as_owner find "$temporary" -type d -exec chmod 0755 {} +
 

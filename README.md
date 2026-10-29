@@ -142,7 +142,9 @@ INSTALL_ROOT=/path/to/container/install/root mise run install
 ├── lib/
 │   ├── libkrun.dylib
 │   └── libkrun.provenance
-└── share/licenses/libkrun/LICENSE
+└── share/licenses/
+    ├── container-krun-runtime/LICENSE
+    └── libkrun/LICENSE
 ```
 
 The VMM helper is ad-hoc signed with the `com.apple.security.hypervisor` entitlement. The runtime plugin does not
